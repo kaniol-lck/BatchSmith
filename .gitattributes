@@ -1,0 +1,29 @@
+# 默认把所有文本文件按 LF 存进仓库，检出时也用 LF。
+# 三个平台的编译器都接受 LF，统一 LF 可以避免跨平台 diff 噪音。
+* text=auto eol=lf
+
+# 只有确实要求 CRLF 的格式才例外
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+*.ps1    text eol=crlf
+*.sln    text eol=crlf
+*.vcxproj text eol=crlf
+*.vcxproj.filters text eol=crlf
+
+# 二进制
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.icns binary
+*.qm   binary
+*.woff binary
+*.woff2 binary
+
+#  vendored 依赖不参与 GitHub 语言统计，也不在 diff 里默认展开
+third_party/** linguist-vendored
+third_party/** -diff
+
+# 生成物不参与语言统计
+*.in linguist-language=Text

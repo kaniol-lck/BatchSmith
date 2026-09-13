@@ -1,0 +1,180 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+# 发版需要创建 Release；其余步骤只读
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # tag 构建不允许被后来的推送取消，否则会发出不完整的 Release
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+env:
+  QT_VERSION: '6.7.2'
+
+jobs:
+  # =========================================================================
+  # 构建 + 测试 + 打包（三平台）
+  # =========================================================================
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-latest
+            qt_arch: win64_msvc2022_64
+            script: packaging/package-windows.sh
+          - name: macOS universal
+            os: macos-latest
+            qt_arch: clang_64
+            script: packaging/package-macos.sh
+          - name: Linux x86_64
+            os: ubuntu-latest
+            qt_arch: linux_gcc_64
+            script: packaging/package-linux.sh
+
+    steps:
+      # submodule 未初始化时 CMake 会主动报错，但这里直接拉好更省事
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装 Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ matrix.qt_arch }}
+          cache: true
+
+      # Ninja 不假设 runner 自带，统一用 pip 装 —— 三个平台同一条命令，
+      # 且把它的 bin 目录显式写进 PATH，避免"找不到 Ninja"这类平台差异。
+      - name: 安装 Ninja
+        shell: bash
+        run: |
+          python -m pip install --quiet ninja
+          echo "$(python -c 'import ninja; print(ninja.BIN_DIR)')" >> "$GITHUB_PATH"
+
+      # MSVC 工具链需要 vcvars 环境；windows runner 默认 PATH 里没有 cl.exe，
+      # 而 Ninja 生成器不会像 VS 生成器那样自己去注册表找 MSVC。
+      - name: 准备 MSVC 环境
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # 链接 Qt6Widgets 需要这些系统库，否则 Linux 上会在链接阶段失败
+      - name: Linux 系统依赖
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgl1-mesa-dev libxkbcommon-dev libxkbcommon-x11-0 \
+            libxcb-icccm4 libxcb-image0 libxcb-keysyms1 libxcb-randr0 \
+            libxcb-render-util0 libxcb-shape0 libxcb-xinerama0 libxcb-xkb1 \
+            libdbus-1-3 libfontconfig1
+
+      - name: 取版本号
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "VERSION=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=0.0.0-dev.${GITHUB_SHA:0:7}" >> "$GITHUB_ENV"
+          fi
+
+      - name: 配置
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: ${{ env.QT_ROOT_DIR }}
+        run: |
+          extra=()
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            # 出 universal 二进制；Qt 的 mac 包本身已经是 universal
+            extra+=("-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64")
+          fi
+          cmake --preset ci "${extra[@]}"
+
+      - name: 构建
+        run: cmake --build --preset ci --parallel
+
+      # 测试只链接 core，不需要图形环境
+      - name: 测试
+        run: ctest --preset ci
+
+      - name: 打包
+        shell: bash
+        env:
+          QT_ROOT_DIR: ${{ env.QT_ROOT_DIR }}
+        run: bash "${{ matrix.script }}" "$PWD/build/ci" "$PWD/dist"
+
+      # 每次构建都留一份产物，便于手工验证；tag 构建另外交给 release 作业发布
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: BatchSmith-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  # =========================================================================
+  # 打 v* tag 时创建 GitHub Release 并附上三平台产物
+  # =========================================================================
+  release:
+    name: 发布 Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 列出将要发布的文件
+        run: ls -lh artifacts
+
+      - name: 创建或更新 Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          # 幂等：重跑同一个 tag 时改为覆盖上传，而不是直接失败
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG 已存在，覆盖上传产物"
+            gh release upload "$TAG" artifacts/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "BatchSmith $TAG" \
+              --generate-notes \
+              artifacts/*
+          fi
+
+  # =========================================================================
+  # 代码格式
+  # =========================================================================
+  format:
+    name: 代码格式
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: 安装 clang-format
+        run: pip install 'clang-format==18.1.8'
+
+      - name: 校验格式
+        run: |
+          find src tests -type f \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) \
+            -print0 | xargs -0 -r clang-format --dry-run --Werror

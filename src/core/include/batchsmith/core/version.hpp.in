@@ -1,0 +1,27 @@
+#pragma once
+
+// ===========================================================================
+// 由 CMake 从 version.hpp.in 生成 —— 不要直接编辑本文件。
+//
+// 改版本号请改顶层 CMakeLists.txt 里 project(... VERSION x.y.z) 那一段。
+// ===========================================================================
+
+#define BATCHSMITH_VERSION_MAJOR @PROJECT_VERSION_MAJOR@
+#define BATCHSMITH_VERSION_MINOR @PROJECT_VERSION_MINOR@
+#define BATCHSMITH_VERSION_PATCH @PROJECT_VERSION_PATCH@
+#define BATCHSMITH_VERSION_STRING "@PROJECT_VERSION@"
+
+// 编译期可见的构建信息，用于 --version 输出与关于对话框
+#define BATCHSMITH_BUILD_TYPE "@BATCHSMITH_BUILD_TYPE_LABEL@"
+#define BATCHSMITH_COMPILER_ID "@CMAKE_CXX_COMPILER_ID@"
+#define BATCHSMITH_QT_VERSION "@Qt6_VERSION@"
+
+namespace batchsmith::core {
+
+/// 形如 "0.1.0"
+[[nodiscard]] const char* version_string() noexcept;
+
+/// 形如 "BatchSmith 0.1.0 (Debug, GNU, Qt 6.7.2)"
+[[nodiscard]] const char* version_banner() noexcept;
+
+}  // namespace batchsmith::core

@@ -1,0 +1,99 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 21,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+      }
+    },
+    {
+      "name": "default",
+      "displayName": "Debug（本机开发）",
+      "description": "需要环境变量 QT_ROOT 指向 Qt 6 的安装前缀，例如 C:/Qt/6.7.2/mingw_64",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_PREFIX_PATH": "$env{QT_ROOT}"
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release（体积与性能优化）",
+      "inherits": "default",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BATCHSMITH_STRICT": "ON"
+      }
+    },
+    {
+      "name": "dev-fast",
+      "displayName": "Debug，关闭 GUI 与测试（只编 core + CLI）",
+      "description": "改 core 时用，省掉 Qt Widgets 与测试的编译时间",
+      "inherits": "default",
+      "cacheVariables": {
+        "BATCHSMITH_BUILD_GUI": "OFF",
+        "BATCHSMITH_BUILD_TESTS": "OFF"
+      }
+    },
+    {
+      "name": "ci",
+      "displayName": "CI（由 install-qt-action 提供 Qt 前缀）",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BATCHSMITH_STRICT": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    },
+    {
+      "name": "dev-fast",
+      "configurePreset": "dev-fast"
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "default",
+      "configurePreset": "default",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "release",
+      "configurePreset": "release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "ci",
+      "configurePreset": "ci",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

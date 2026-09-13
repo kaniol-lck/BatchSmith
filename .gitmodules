@@ -1,0 +1,16 @@
+[submodule "third_party/lua"]
+	path = third_party/lua
+	url = https://github.com/lua/lua
+	shallow = true
+[submodule "third_party/sol2"]
+	path = third_party/sol2
+	url = https://github.com/ThePhD/sol2
+	shallow = true
+[submodule "third_party/tomlplusplus"]
+	path = third_party/tomlplusplus
+	url = https://github.com/marzer/tomlplusplus
+	shallow = true
+[submodule "third_party/doctest"]
+	path = third_party/doctest
+	url = https://github.com/doctest/doctest
+	shallow = true

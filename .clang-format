@@ -1,0 +1,48 @@
+# BatchSmith 代码风格
+# 用法：clang-format -i <file>；CI 用 clang-format --dry-run --Werror 校验
+---
+Language: Cpp
+BasedOnStyle: LLVM
+Standard: c++20
+
+ColumnLimit: 100
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ContinuationIndentWidth: 8
+AccessModifierOffset: -4
+
+# 指针/引用贴左，便于与乘号区分
+PointerAlignment: Left
+ReferenceAlignment: Left
+
+# 头文件顺序交给 clang-format 统一，减少 review 噪音
+SortIncludes: CaseSensitive
+IncludeBlocks: Preserve
+
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Empty
+AllowShortLambdasOnASingleLine: All
+AlwaysBreakTemplateDeclarations: Yes
+# 不允许把返回类型单独甩到一行（[[nodiscard]] int 换行后很难看）。
+# 宁可让参数列表逐行展开。
+PenaltyReturnTypeOnItsOwnLine: 10000
+BinPackArguments: false
+BinPackParameters: false
+BreakBeforeBraces: Attach
+BreakConstructorInitializers: BeforeColon
+ConstructorInitializerIndentWidth: 4
+EmptyLineBeforeAccessModifier: LogicalBlock
+FixNamespaceComments: true
+IndentCaseLabels: true
+NamespaceIndentation: None
+ReflowComments: true
+SeparateDefinitionBlocks: Always
+SpaceAfterTemplateKeyword: false
+SpacesBeforeTrailingComments: 2
+
+# 项目约定：不用 tab 对齐、不在行尾留空格
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
