@@ -111,6 +111,12 @@ export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
 ./build/windows-mingw/bin/bs.exe eval --list list1=报告A,报告B --list list2=1,2 \
     -- 'mv $list1[i]$ out/$list2[i]$'
 
+# 列表也可以绑定文件夹：@dir:<文件夹>[;选项]
+# 条目按自然序读入（file2 在 file10 之前），值是相对该文件夹的路径
+./build/windows-mingw/bin/bs.exe eval --list 'list1=@dir:D:/anime;filter=*.mkv;recursive=1' \
+    -- 'mv "$list1[i]$" "第$fmt("%02d",i)$话 正片.mkv"'
+# 选项：filter=<glob>（多个用 ; 或 , 分隔） recursive=1  dirs=1（含子目录） hidden=1
+
 # 语法与函数速查（与界面「帮助 → DSL 语法与函数速查」同一份内容）
 ./build/windows-mingw/bin/bs.exe cheatsheet
 

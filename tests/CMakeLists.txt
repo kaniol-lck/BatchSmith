@@ -12,6 +12,7 @@ add_executable(batchsmith_tests
     main.cpp
     core/test_cheatsheet.cpp
     core/test_compiler.cpp
+    core/test_dir_source.cpp
     core/test_engine.cpp
     core/test_natural_compare.cpp
     core/test_sandbox.cpp
@@ -41,6 +42,7 @@ if(BATCHSMITH_BUILD_GUI)
     add_executable(batchsmith_gui_tests
         gui/main.cpp
         gui/test_cheatsheet_dialog.cpp
+        gui/test_list_source_column.cpp
         gui/test_main_window.cpp
         gui/ui_shot.cpp
         gui/ui_shot.hpp)

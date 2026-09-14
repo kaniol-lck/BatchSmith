@@ -44,6 +44,13 @@ void print_plan() {
         << "可用子命令：\n"
         << "  bs eval <模板> [--list 名=值1,值2]… [--ignore 名]… [--show-lua]\n"
         << "        只跑 DSL 编译与沙箱求值，**不接触文件系统**。输出为逐行结果。\n"
+        << "        --list 也可以绑定文件夹：\n"
+        << "          --list 'list1=@dir:D:/anime'\n"
+        << "          --list 'list1=@dir:D:/anime;filter=*.mkv;recursive=1'\n"
+        << "        选项：filter=<glob>（多个用 ; 或 , 分隔，作用于条目名）\n"
+        << "              recursive=1 递归子目录   dirs=1 把子目录也算条目\n"
+        << "              hidden=1 含以 . 开头的条目\n"
+        << "        条目按**自然序**排列（file2 在 file10 之前），值为相对该文件夹的路径。\n"
         << "  bs cheatsheet [--html | --hhc]\n"
         << "        打印 DSL 语法、工具函数与示例（与界面的「帮助」同一份内容）；\n"
         << "        --html 输出可独立打开的 HTML 手册；\n"
@@ -55,23 +62,118 @@ void print_plan() {
         << "  bs undo  <日志>              按撤销日志逆序回放（Phase 4）\n";
 }
 
+/// 解析 `recursive=1` 这类开关的取值。`recursive`（无 `=`）也算打开。
+bool parse_switch(const QString& value, bool* ok) {
+    const QString lowered = value.trimmed().toLower();
+    if (lowered.isEmpty() || lowered == QLatin1String("1") || lowered == QLatin1String("true") ||
+        lowered == QLatin1String("yes") || lowered == QLatin1String("on")) {
+        *ok = true;
+        return true;
+    }
+    if (lowered == QLatin1String("0") || lowered == QLatin1String("false") ||
+        lowered == QLatin1String("no") || lowered == QLatin1String("off")) {
+        *ok = true;
+        return false;
+    }
+    *ok = false;
+    return false;
+}
+
+/// `@dir:<文件夹>[;<选项>]…` → 绑定文件夹的列表源。
+///
+/// 语法刻意做得紧凑：CLI 的定位是脚本与验证，一个列表的完整来源应当能写在一行里。
+/// 路径取到第一个 `;` 之前，因此路径里的 `=` 不会干扰解析。
+batchsmith::core::ListSource parse_dir_option(const QString& name,
+                                              const QString& body,
+                                              bool* ok,
+                                              QString* error) {
+    batchsmith::core::DirQuery query;
+
+    const QStringList parts = body.split(QLatin1Char(';'));
+    query.path = parts.first().trimmed();
+
+    for (qsizetype index = 1; index < parts.size(); ++index) {
+        const QString piece = parts.at(index).trimmed();
+        if (piece.isEmpty()) {
+            continue;
+        }
+        const int separator = piece.indexOf(QLatin1Char('='));
+        const QString key = (separator < 0 ? piece : piece.left(separator)).trimmed().toLower();
+        const QString value = (separator < 0 ? QString() : piece.mid(separator + 1));
+
+        bool parsed = false;
+        if (key == QLatin1String("filter")) {
+            query.filter = value;
+        } else if (key == QLatin1String("recursive")) {
+            query.recursive = parse_switch(value, &parsed);
+            if (!parsed) {
+                *ok = false;
+                *error =
+                        QStringLiteral("--list %1：recursive 只认 1/0（收到 %2）").arg(name, value);
+                return {};
+            }
+        } else if (key == QLatin1String("dirs")) {
+            query.include_dirs = parse_switch(value, &parsed);
+            if (!parsed) {
+                *ok = false;
+                *error = QStringLiteral("--list %1：dirs 只认 1/0（收到 %2）").arg(name, value);
+                return {};
+            }
+        } else if (key == QLatin1String("hidden")) {
+            query.include_hidden = parse_switch(value, &parsed);
+            if (!parsed) {
+                *ok = false;
+                *error = QStringLiteral("--list %1：hidden 只认 1/0（收到 %2）").arg(name, value);
+                return {};
+            }
+        } else {
+            *ok = false;
+            *error = QStringLiteral("--list %1：不认识的选项「%2」"
+                                    "（可用 filter / recursive / dirs / hidden）")
+                             .arg(name, key);
+            return {};
+        }
+    }
+
+    // 路径不通时直接失败，不给一个空列表 —— 空列表会让"批量操作什么都没做"
+    // 看起来像正常结果。
+    QString scan_error;
+    batchsmith::core::ListSource source =
+            batchsmith::core::ListSource::from_directory(name, query, &scan_error);
+    if (!scan_error.isEmpty()) {
+        *ok = false;
+        *error = QStringLiteral("--list %1：%2").arg(name, scan_error);
+        return {};
+    }
+
+    *ok = true;
+    return source;
+}
+
 /// `--list 名=值1,值2` → 列表源。逗号分隔；`\,` 表示字面逗号。
+/// 值以 `@dir:` 开头时改为绑定文件夹（见 parse_dir_option）。
 batchsmith::core::ListSource parse_list_option(const QString& spec, bool* ok, QString* error) {
     const int separator = spec.indexOf(QLatin1Char('='));
     if (separator <= 0) {
         *ok = false;
-        *error = QStringLiteral("--list 的写法是 名=值1,值2，收到：%1").arg(spec);
+        *error = QStringLiteral("--list 的写法是 名=值1,值2 或 名=@dir:<文件夹>，收到：%1")
+                         .arg(spec);
         return {};
     }
 
+    const QString name = spec.left(separator);
+    const QString body = spec.mid(separator + 1);
+    if (body.startsWith(QLatin1String("@dir:"))) {
+        return parse_dir_option(name, body.mid(5), ok, error);
+    }
+
     batchsmith::core::ListSource source;
-    source.name = spec.left(separator);
+    source.name = name;
 
     QStringList items;
     QString current;
     bool escaped = false;
-    const QString values = spec.mid(separator + 1);
-    for (const QChar ch : values) {
+    for (const QChar ch : body) {
         if (escaped) {
             current.append(ch);
             escaped = false;
@@ -106,7 +208,8 @@ int run_eval(const QCommandLineParser& parser) {
 
     const QStringList positional = parser.positionalArguments();
     if (positional.size() < 2) {
-        err_stream() << "用法：bs eval <模板> [--list 名=值1,值2]… [--ignore 名]…\n";
+        err_stream() << "用法：bs eval <模板> [--list 名=值1,值2 或 名=@dir:<文件夹>]… "
+                        "[--ignore 名]…\n";
         return kExitUsage;
     }
     const QString template_text = positional.at(1);
@@ -180,9 +283,12 @@ int main(int argc, char* argv[]) {
     parser.addHelpOption();
     parser.addVersionOption();
 
-    parser.addOption(QCommandLineOption(QStringLiteral("list"),
-                                        QStringLiteral("列表源，形如 名=值1,值2。可重复。"),
-                                        QStringLiteral("名=值")));
+    parser.addOption(
+            QCommandLineOption(QStringLiteral("list"),
+                               QStringLiteral("列表源：名=值1,值2（手输）或 "
+                                              "名=@dir:<文件夹>[;filter=<glob>][;recursive=1]"
+                                              "[;dirs=1][;hidden=1]（绑定文件夹）。可重复。"),
+                               QStringLiteral("名=值")));
     parser.addOption(QCommandLineOption(QStringLiteral("ignore"),
                                         QStringLiteral("把该列表的缺省方式设为 Ignore"
                                                        "（整批行数取最短）。可重复。"),

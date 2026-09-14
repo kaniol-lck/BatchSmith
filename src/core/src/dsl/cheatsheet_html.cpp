@@ -105,7 +105,36 @@ struct GroupAnchor {
                           "会明确报错（打错字不会被忽略）。</p>");
 }
 
-/// 章节 3：行数与展开
+/// 章节 3：列表从哪来
+[[nodiscard]] QString render_lists() {
+    return QStringLiteral(
+            "<p>每一列都可以在两种来源之间切换（列标题旁的下拉，"
+            "或者直接把文件夹拖到列上）：</p>"
+            "<table>"
+            "<tr><th>来源</th><th>说明</th></tr>"
+            "<tr><td><b>手输</b></td><td>直接键入条目，可增删改</td></tr>"
+            "<tr><td><b>文件夹</b></td><td>绑定一个文件夹，按过滤与递归开关取数"
+            "（列表只读，想手改就切回手输）</td></tr>"
+            "</table>"
+            "<ul>"
+            "<li>文件夹来源的条目是<b>相对该文件夹</b>的路径，用 <code>/</code> 分隔，"
+            "按<b>自然序</b>排列（<code>第2话</code> 在 <code>第10话</code> 之前）。"
+            "要绝对路径就 <code>join(根, list1[i])</code>。</li>"
+            "<li>过滤写 glob：<code>*</code> 任意长度、<code>?</code> 恰好一个字符、"
+            "<code>[abc]</code> 字符集（<code>[!abc]</code> 取反）；"
+            "<b>大小写不敏感</b>，只匹配文件名、不跨目录；多个用 <code>;</code> 或 "
+            "<code>,</code> 分隔（任一匹配即可）。</li>"
+            "<li>路径不通会<b>明确报错</b>，而不是给一个空列表 —— "
+            "空列表在批量操作里意味着「什么都不会发生」，是最难排查的一类问题。</li>"
+            "<li>命令行：<code>--list 'list1=@dir:D:/anime;filter=*.mkv;recursive=1'</code>；"
+            "另有 <code>dirs=1</code>（把子目录也算条目）、"
+            "<code>hidden=1</code>（含 <code>.</code> 开头的条目）。</li>"
+            "<li>各列长度不齐时每列有自己的缺省：留空 / 忽略（取最短）/ 从头重复。"
+            "命令行用 <code>--ignore 名</code> 把某列设为「忽略」。</li>"
+            "</ul>");
+}
+
+/// 章节 4：行数与展开
 [[nodiscard]] QString render_rows() {
     return QStringLiteral(
             "<ul>"
@@ -236,21 +265,40 @@ QString cheatsheet_html() {
     }
     html += QStringLiteral("</ul></div>");
 
-    const QList<CheatSection>& sections_list = cheatsheet_sections();
-    const QString bodies[] = {render_overview(),
-                              render_names(),
-                              render_rows(),
-                              render_helpers(),
-                              render_lua(),
-                              render_pitfalls(),
-                              render_examples()};
-    static_assert(std::size(bodies) == 7);
+    // 正文按**锚点**匹配，不靠数组下标对齐章节顺序：中间插入一章时
+    // 下标会静默错位成"标题配错正文"，而锚点写错只会让那一节空着，测试能抓住。
+    struct SectionBody {
+        const char* anchor;
+        QString (*render)();
+    };
 
-    for (qsizetype index = 0; index < sections_list.size(); ++index) {
+    static const SectionBody kBodies[] = {
+            {"sec-overview", &render_overview},
+            {"sec-names", &render_names},
+            {"sec-lists", &render_lists},
+            {"sec-rows", &render_rows},
+            {"sec-helpers", &render_helpers},
+            {"sec-lua", &render_lua},
+            {"sec-pitfalls", &render_pitfalls},
+            {"sec-examples", &render_examples},
+    };
+
+    for (const CheatSection& section : cheatsheet_sections()) {
         html += QStringLiteral("<h2 id=\"%1\">%2</h2>")
-                        .arg(esc(sections_list.at(index).anchor),
-                             esc(sections_list.at(index).title));
-        html += bodies[index];
+                        .arg(esc(section.anchor), esc(section.title));
+
+        QString body;
+        for (const SectionBody& candidate : kBodies) {
+            if (section.anchor == QLatin1String(candidate.anchor)) {
+                body = candidate.render();
+                break;
+            }
+        }
+        if (body.isEmpty()) {
+            // 漏了正文时在帮助里直接写出来 —— 比静默给一节空标题好得多
+            body = QStringLiteral("<p class=\"note\">（这一节还没有正文）</p>");
+        }
+        html += body;
     }
 
     html += QStringLiteral("</body></html>");
@@ -259,7 +307,7 @@ QString cheatsheet_html() {
 
 QString cheatsheet_hhc() {
     // CHM 的目录文件（HTML Help 的 site map）。两级：
-    //   顶层 = 七个章节；二级 = "工具函数"与"示例"两章里的分组。
+    //   顶层 = 各章节；二级 = "工具函数"与"示例"两章里的分组。
     // 全部由数据生成 —— 与界面帮助窗口的目录、`bs cheatsheet` 的章节同源。
     QString hhc;
     hhc += QStringLiteral("<!DOCTYPE HTML PUBLIC \"-//IETF//DTD HTML//EN\">\n");

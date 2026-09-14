@@ -20,14 +20,29 @@ const QList<CheatSection>& sections() {
     static const QList<CheatSection> kList = {
             {QStringLiteral("sec-overview"), QStringLiteral("一、模板长什么样")},
             {QStringLiteral("sec-names"), QStringLiteral("二、区段里能拿到的名字")},
-            {QStringLiteral("sec-rows"), QStringLiteral("三、行数与展开")},
-            {QStringLiteral("sec-helpers"), QStringLiteral("四、工具函数")},
-            {QStringLiteral("sec-lua"), QStringLiteral("五、沙箱里可用的 Lua")},
-            {QStringLiteral("sec-pitfalls"), QStringLiteral("六、容易踩的几个点")},
+            {QStringLiteral("sec-lists"), QStringLiteral("三、列表从哪来（手输 / 绑定文件夹）")},
+            {QStringLiteral("sec-rows"), QStringLiteral("四、行数与展开")},
+            {QStringLiteral("sec-helpers"), QStringLiteral("五、工具函数")},
+            {QStringLiteral("sec-lua"), QStringLiteral("六、沙箱里可用的 Lua")},
+            {QStringLiteral("sec-pitfalls"), QStringLiteral("七、容易踩的几个点")},
             {QStringLiteral("sec-examples"),
-             QStringLiteral("七、示例（下面每一条都会被自动测试跑一遍）")},
+             QStringLiteral("八、示例（下面每一条都会被自动测试跑一遍）")},
     };
     return kList;
+}
+
+/// 按**锚点**取章节标题。
+///
+/// 刻意不用下标：在中间插入一章时，文本版与 HTML 版的下标会各自错位成
+/// 「标题配错正文」—— 这种事编译不报错，看输出也未必发现。锚点写错只会
+/// 得到空标题，测试能立刻抓住。
+[[nodiscard]] QString section_title(QStringView anchor) {
+    for (const CheatSection& section : sections()) {
+        if (section.anchor == anchor) {
+            return section.title;
+        }
+    }
+    return {};
 }
 
 }  // namespace
@@ -427,7 +442,7 @@ QString cheatsheet_text() {
     lines.append(QString());
 
     // ---- 基本形态 ----
-    lines.append(sections().at(0).title);
+    lines.append(section_title(u"sec-overview"));
     lines.append(QString());
     lines.append(QStringLiteral("    模板 = 普通文字 + 若干 $...$ 区段。"));
     lines.append(QStringLiteral("    $ 与 $ 之间写一段 Lua 表达式，求值结果替换这一处。"));
@@ -439,7 +454,7 @@ QString cheatsheet_text() {
     lines.append(QString());
 
     // ---- 可用的名字 ----
-    lines.append(sections().at(1).title);
+    lines.append(section_title(u"sec-names"));
     lines.append(QString());
     lines.append(QStringLiteral("    i              当前行号，从 1 开始"));
     lines.append(QStringLiteral("    rows           本批总行数"));
@@ -451,8 +466,31 @@ QString cheatsheet_text() {
             QStringLiteral("    名字写成 listN 却没这个列表时会明确报错（打错字不会被忽略）。"));
     lines.append(QString());
 
+    // ---- 列表从哪来 ----
+    lines.append(section_title(u"sec-lists"));
+    lines.append(QString());
+    lines.append(QStringLiteral("    · 每列可以在两种来源之间切换（列标题旁的下拉，"
+                                "或者直接把文件夹拖到列上）："));
+    lines.append(QStringLiteral("        手输      直接键入条目"));
+    lines.append(QStringLiteral("        文件夹    绑定一个文件夹，按过滤取数"));
+    lines.append(QStringLiteral("    · 文件夹来源的条目是相对该文件夹的路径，用 / 分隔，按自然序"));
+    lines.append(
+            QStringLiteral("      排列（第2话 在第10话 之前）。要绝对路径就 join(根, list1[i])。"));
+    lines.append(QStringLiteral("    · 过滤写 glob：* 任意长度、? 恰好一个字符、[abc] 字符集"));
+    lines.append(QStringLiteral("      （[!abc] 取反）；大小写不敏感，只匹配文件名、不跨目录；"));
+    lines.append(QStringLiteral("      多个用 ; 或 , 分隔（任一匹配即可）。"));
+    lines.append(QStringLiteral("    · 路径不通会明确报错，而不是给一个空列表 —— 空列表在批量"));
+    lines.append(QStringLiteral("      操作里意味着「什么都不会发生」，是最难排查的一类问题。"));
+    lines.append(
+            QStringLiteral("    · 命令行：--list 'list1=@dir:D:/anime;filter=*.mkv;recursive=1'"));
+    lines.append(
+            QStringLiteral("      另有 dirs=1（把子目录也算条目）、hidden=1（含 . 开头的条目）。"));
+    lines.append(QStringLiteral("    · 各列长度不齐时，每列有自己的缺省：留空 / 忽略（取最短）/"));
+    lines.append(QStringLiteral("      从头重复。命令行用 --ignore 名 把某列设为「忽略」。"));
+    lines.append(QString());
+
     // ---- 行数与展开 ----
-    lines.append(sections().at(2).title);
+    lines.append(section_title(u"sec-rows"));
     lines.append(QString());
     lines.append(QStringLiteral("    · 行数 = 各列表长度：有 Ignore 参与的取最短，否则取最长。"));
     lines.append(QStringLiteral("    · 模板里用了 i 或 rows ⇒ 逐行求值（这就是「逐行对应」）。"));
@@ -464,7 +502,7 @@ QString cheatsheet_text() {
     lines.append(QString());
 
     // ---- 工具函数 ----
-    lines.append(sections().at(3).title);
+    lines.append(section_title(u"sec-helpers"));
     lines.append(QString());
     QString current_group;
     for (const HelperDoc& doc : helper_docs()) {
@@ -478,7 +516,7 @@ QString cheatsheet_text() {
     lines.append(QString());
 
     // ---- Lua 原生 ----
-    lines.append(sections().at(4).title);
+    lines.append(section_title(u"sec-lua"));
     lines.append(QString());
     lines.append(QStringLiteral("    可用：算术与比较、字符串（含 s:upper() 这类方法）、"));
     lines.append(QStringLiteral("          string / table / math / utf8 四张库，"));
@@ -495,7 +533,7 @@ QString cheatsheet_text() {
     lines.append(QString());
 
     // ---- 易错点 ----
-    lines.append(sections().at(5).title);
+    lines.append(section_title(u"sec-pitfalls"));
     lines.append(QString());
     lines.append(QStringLiteral("    · 区段里的字符串是 Lua 字符串，反斜杠要按 Lua 规则写："));
     lines.append(QStringLiteral("      正则推荐用长括号 [[\\d+]]，不必转义。"));
@@ -508,7 +546,7 @@ QString cheatsheet_text() {
     lines.append(QString());
 
     // ---- 示例 ----
-    lines.append(sections().at(6).title);
+    lines.append(section_title(u"sec-examples"));
     lines.append(QString());
 
     QString example_group;

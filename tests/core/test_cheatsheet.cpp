@@ -175,7 +175,7 @@ TEST_CASE("速查表：CHM 目录（.hhc）与 HTML 的锚点一一对应") {
     const QString html = cheatsheet_html();
     REQUIRE(hhc.contains(QStringLiteral("<!DOCTYPE HTML PUBLIC")));
 
-    // 七个章节都要有目录项，且跳转目标在 HTML 里真实存在
+    // 每个章节都要有目录项，且跳转目标在 HTML 里真实存在
     for (const auto& section : cheatsheet_sections()) {
         CAPTURE(section.title.toStdString());
         CHECK(hhc.contains(section.title));
@@ -197,6 +197,12 @@ TEST_CASE("速查表：CHM 目录（.hhc）与 HTML 的锚点一一对应") {
     }
     CHECK(group_count == 12);  // 6 组工具函数 + 6 组示例
 
-    // 目录项总数 = 7 个章节 + 12 个分组
-    CHECK(hhc.count(QStringLiteral("<param name=\"Name\"")) == 19);
+    // 目录项总数 = 章节数 + 分组数。写成推导而不是硬编码：
+    // 加一节时不必改这里，而这个式子仍然能抓住"漏了目录项"。
+    CHECK(hhc.count(QStringLiteral("<param name=\"Name\"")) ==
+          cheatsheet_sections().size() + group_count);
+
+    // 每一节都必须有正文 —— 漏写正文时渲染器会留下一句占位话，
+    // 那种帮助看起来"有标题、没内容"，比报错更难发现
+    CHECK_FALSE(html.contains(QStringLiteral("（这一节还没有正文）")));
 }

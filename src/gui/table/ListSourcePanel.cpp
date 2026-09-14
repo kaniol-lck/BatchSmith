@@ -18,8 +18,8 @@ ListSourcePanel::ListSourcePanel(QWidget* parent) : QWidget(parent) {
     addButton->setToolTip(QStringLiteral("在右侧新增一个列表列"));
     connect(addButton, &QToolButton::clicked, this, &ListSourcePanel::addColumn);
 
-    auto* hint = new QLabel(QStringLiteral("每列是一个列表源；表达式里用 $list1$ 引用。"
-                                           "双击项可编辑，列标题右侧 × 删除该列。"),
+    auto* hint = new QLabel(QStringLiteral("每列是一个列表源：手输条目，或绑定文件夹"
+                                           "（把文件夹拖到列上即可）。表达式里用 $list1$ 引用。"),
                             this);
     hint->setStyleSheet(QStringLiteral("color: palette(mid);"));
 
