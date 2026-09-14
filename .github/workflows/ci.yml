@@ -140,12 +140,22 @@ jobs:
           QT_ROOT_DIR: ${{ env.QT_ROOT_DIR }}
         run: bash "${{ matrix.script }}" "$PWD/build/ci" "$PWD/dist"
 
-      # 每次构建都留一份产物，便于手工验证；tag 构建另外交给 release 作业发布
+      # 只上传**打包好的归档**，不含 dist/ 下的暂存目录。
+      #
+      # 原先写的是 dist/*，于是每个 artifact 里同时装着「已部署的暂存目录」与
+      # 「归档」两份内容，体积接近翻倍（Windows 实测：zip 11.5MB，artifact 36.5MB）。
+      # 更要紧的是 release 作业那边：它用 merge-multiple 把三个 artifact 合并进同一
+      # 目录，三个平台的 BatchSmith/ 暂存目录会**互相覆盖**，而且 gh release upload
+      # 的 artifacts/* 里还会混进一个目录参数 —— 首次打 v* tag 时大概率直接失败。
+      # 只传归档后：三个产物文件名互不冲突，Release 附件就是三个干净的归档。
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: BatchSmith-${{ matrix.os }}
-          path: dist/*
+          path: |
+            dist/*.zip
+            dist/*.dmg
+            dist/*.tar.gz
           if-no-files-found: error
           retention-days: 14
 

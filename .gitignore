@@ -80,6 +80,8 @@ Desktop.ini
 .workbuddy/memory/
 .workbuddy/tmp/
 .workbuddy/patches/
+# 本地工具脚本（如 Windows 下的窗口截图），跨平台可复现的做法见 docs/界面说明.md
+.workbuddy/tools/
 
 # ---------------------------------------------------------------------------
 # 本地私有内容

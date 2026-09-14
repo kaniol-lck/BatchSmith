@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(BatchSmith
-    VERSION 0.1.0
+    VERSION 0.2.0
     DESCRIPTION "把列表与表达式编译成批量操作 —— 预设驱动的批处理工具"
     HOMEPAGE_URL "https://github.com/"
     LANGUAGES C CXX)

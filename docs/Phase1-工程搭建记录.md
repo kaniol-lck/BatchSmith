@@ -410,7 +410,7 @@ macOS 与 Linux 脚本只做了 `bash -n` 语法检查，**未在真机跑过** 
 
 ---
 
-## S6 CI：三平台构建 + 打包 + 发版 🔄 首轮失败已修复，待复验
+## S6 CI：三平台构建 + 打包 + 发版 ✅ 三平台全绿（2026-09-14 复验）
 
 `.github/workflows/ci.yml`。三个作业：`build`（矩阵）、`release`（打 tag 时）、`format`。
 
@@ -455,6 +455,26 @@ macOS 与 Linux 脚本只做了 `bash -n` 语法检查，**未在真机跑过** 
 
 顺带一个好收获：**Linux 全绿同时验证了 `package-linux.sh` 真的能用** ——
 它此前只做过 `bash -n` 语法检查，没有真机跑过。
+
+#### 修复后的复验结果：四个 job 全部 success
+
+推送修复提交 `b95c01a` 后，run **34857402226** 在约 2.5 分钟内跑完，**四个 job 全绿**：
+
+| Job | 结果 | 这一轮真正被验证到的东西 |
+|---|---|---|
+| 代码格式 | ✅ | clang-format 18.1.8 全量合规 |
+| Linux x86_64 | ✅ | 构建 / 测试 / 打包 / 上传全流程 |
+| macOS universal | ✅ | **AGL 修复生效**（构建从失败变成功），且 `macdeployqt` + `hdiutil` **首次真机跑通** |
+| Windows x64 | ✅ | **arch 修正生效**（安装 Qt 从失败变成功），MSVC + Ninja 构建与打包首次跑通 |
+
+「发布 Release」按设计 `skipped`（只在打 `v*` tag 时触发）。
+
+两点值得单独记下：
+
+- **macOS 与 Windows 的打包脚本从此有了真机记录。** 在此之前两者都只在本机做过语法检查
+  （Windows 端到端跑过 MinGW 版，但 CI 用的是 MSVC 工具链；macOS 端到端从未跑过）。
+- **失败→修复→复验的闭环是有效的**：两处失败都在本机定位到根因并各自留下可复现的证据，
+  推送后一次通过，没有试探性重推。
 
 两个失败都与功能代码无关，但都必须在工程上解决。
 
@@ -545,6 +565,39 @@ CI 的红应该只反映真实问题，而不是"某个编译器恰好多了一�
 
 现在排除列表从 3 个变成 4 个（`lua.c` / `luac.c` / `onelua.c` / `ltests.c`），
 Lua 编译单元数 **34 → 32**，配置阶段会打印这个数字。
+
+---
+
+#### artifact 里只放"归档"，不放"目录"——为什么不让 action 直接压缩原始目录
+
+CI 产物原先写的是 `path: dist/*`，于是同一份内容被装了两遍：**暂存目录 + 已打好的归档**，
+一个 artifact 里既有文件夹又有压缩包。现在只上传归档，每个平台一个文件
+（`*.zip` / `*.dmg` / `*.tar.gz`）。
+
+**为什么不让 `upload-artifact` 直接压缩暂存目录**（那样连归档都不必自己做）？
+因为 action 的 artifact 本质就是一个 Zip，而
+[官方 README 的 Limitations 明写](https://github.com/actions/upload-artifact#limitations)：
+
+> **Permission Loss** — File permissions are not maintained during artifact upload.
+> All directories will have 755 and all files will have 644. …
+> If you must preserve permissions, you can tar all of your files together before
+> artifact upload.
+
+落到本项目，有两个会真坏的地方：
+
+- **Linux**：包里的 `bs` 与启动脚本靠 `chmod +x`（见 `package-linux.sh`）。
+  上传后全部变成 644，用户下载解压得到的东西**不可执行**。
+- **macOS**：`.app` 内 `Contents/MacOS/batchsmith` 的可执行位一旦丢失，
+  **双击不启动**；且 Qt framework 在 `.app/Contents/Frameworks/` 下依赖
+  `Versions/Current` 这类符号链接，artifact 的 Zip 对符号链接的处理会破坏它们
+  （社区已有因此导致代码签名校验失败的案例）。
+
+所以结论是：**归档由打包脚本在各自平台上产出一次**。
+它本来就是交付给用户的东西（也直接作为 Release 附件），CI 只上传这一个文件 ——
+既没有重复产物，权限与符号链接也由 `zip` / `tar` / `hdiutil` 在正确的平台上一次固化。
+
+> 一句话原则：**"压缩"这件事必须发生在拥有该格式语义的那台机器上**，
+> 而不是发生在只是负责转运的 artifact 层。
 
 ---
 

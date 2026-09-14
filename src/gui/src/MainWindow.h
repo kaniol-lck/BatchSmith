@@ -2,24 +2,33 @@
 
 #include <QMainWindow>
 
-class QPlainTextEdit;
+class ExpressionBar;
+class ListSourcePanel;
+class ResultPanel;
 class QSplitter;
-class QTableView;
 
-/// BatchSmith 主窗口。
+/// BatchSmith 主窗口：**上下两段**。
 ///
-/// 当前是**骨架**：只搭出技术方案里定下的版面分区，用来验证 Qt Widgets
-/// 的构建与元对象链路可用，尚未接入 core 的任何功能。
+/// ```text
+/// ┌──────────────────────────────────────────────────────┐
+/// │ 列表区（水平滚动）                                    │
+/// │ ┌────────┐ ┌────────┐ ┌────────┐                     │
+/// │ │ list1  │ │ list2  │ │ list3  │  ← 每列内部竖向滚动  │
+/// │ │  1     │ │  a     │ │  x     │     ＋/× 控制列数量   │
+/// │ │  2     │ │  b     │ │  y     │                     │
+/// │ └────────┘ └────────┘ └────────┘                     │
+/// ├──────────────────────────────────────────────────────┤
+/// │ [ 表达式__________________________ ] [ 确定 ]         │
+/// │ 提示 / 报错                                          │
+/// │ 输出列表                                             │
+/// │   mv 1 out                                           │
+/// │   mv 2 out                                           │
+/// └──────────────────────────────────────────────────────┘
+/// ```
 ///
-/// 目标版面（见构想书「界面」一节与技术方案 §7 M5）：
-///
-///   ┌──────────────────────────────────────────────┐
-///   │ 列表区：N 个 QTableView 并排，可增删、锁定滚动 │
-///   ├──────────────────────────────────────────────┤
-///   │ 表达式编辑器（QPlainTextEdit + 高亮 + 补全）  │
-///   ├──────────────────────────────────────────────┤
-///   │ 执行结果 / Plan diff 预览                     │
-///   └──────────────────────────────────────────────┘
+/// 界面本身**不含任何求值逻辑**：点的「确定」只是把当前列与表达式交给
+/// `batchsmith::core::dsl::evaluate_simple`，再把结果铺到输出列表上。
+/// 这样 Phase 2 换成 Lua 编译器时，这里一行都不用改。
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -27,6 +36,8 @@ public:
     explicit MainWindow(QWidget* parent = nullptr);
 
 private slots:
+    void evaluateExpression(const QString& expression);
+    void refreshListSummary();
     void showAbout();
 
 private:
@@ -34,10 +45,7 @@ private:
     void buildMenus();
 
     QSplitter* m_topBottomSplitter = nullptr;
-    QSplitter* m_listSplitter = nullptr;
-    QSplitter* m_editorSplitter = nullptr;
-    QTableView* m_listView1 = nullptr;
-    QTableView* m_listView2 = nullptr;
-    QPlainTextEdit* m_editor = nullptr;
-    QPlainTextEdit* m_preview = nullptr;
+    ListSourcePanel* m_listPanel = nullptr;
+    ExpressionBar* m_expressionBar = nullptr;
+    ResultPanel* m_resultPanel = nullptr;
 };

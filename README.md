@@ -2,11 +2,13 @@
 
 把**多个列表 + 一个输出表达式**编译成批量操作。配置一次预设，之后只需选择文件。
 
-> 当前状态：**Phase 1（POC）已完成** —— 构建、测试、CI、打包链路全部跑通。
-> core 只有版本信息与自然排序比较器，CLI 与 GUI 尚未接入功能。
+> 当前版本：**0.2.0**（P1 已完成；主界面已按「上下两段」落地，核心表达式内核尚在 Phase 2）。
+> 变更记录见 [`CHANGELOG.md`](CHANGELOG.md)。
 >
 > - 阶段路线图：[`docs/项目阶段规划.md`](docs/项目阶段规划.md)（Phase 1–8）
 > - 技术选型与设计决策：[`docs/技术方案与实现路线.md`](docs/技术方案与实现路线.md)（ADR-1–10）
+> - 界面版面与交互：[`docs/界面说明.md`](docs/界面说明.md)
+- 版本变更记录：[`CHANGELOG.md`](CHANGELOG.md)
 > - Phase 1 施工细节与踩坑记录：[`docs/Phase1-工程搭建记录.md`](docs/Phase1-工程搭建记录.md)
 
 ## 这是什么
@@ -31,7 +33,7 @@
 | 表达式运行时 | Lua 5.4（PUC Lua，**不用 LuaJIT**） |
 | Lua 绑定 | sol2 |
 | 构建 | CMake ≥ 3.21 + Ninja |
-| 测试 | doctest（core）/ QTest（GUI，待 M5） |
+| 测试 | doctest（core 与 GUI 离屏测试，未引入 QTest） |
 | 许可 | GPL-3.0 |
 
 几个决定背后的理由（详见技术方案 ADR）：
@@ -118,7 +120,7 @@ export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
 > 要一份可分发的完整包，直接用打包脚本：
 >
 > ```bash
-> VERSION=0.1.0 bash packaging/package-windows.sh "$PWD/build/windows-mingw-release" "$PWD/dist"
+> VERSION=0.2.0 bash packaging/package-windows.sh "$PWD/build/windows-mingw-release" "$PWD/dist"
 > ```
 >
 > 详见 [`docs/Phase1-工程搭建记录.md`](docs/Phase1-工程搭建记录.md) 的 S5。
@@ -130,14 +132,16 @@ BatchSmith/
 ├── CMakeLists.txt            顶层工程
 ├── CMakePresets.json         可移植的构建预设（committed）
 ├── CMakeUserPresets.json     本机工具链路径（gitignored）
-├── docs/                     技术方案与搭建步骤
+├── CHANGELOG.md              版本变更记录
+├── docs/                     技术方案、阶段规划、界面说明、施工记录（含 docs/images 截图）
 ├── third_party/              vendored 依赖：Lua / sol2 / toml++ / doctest
 ├── src/
 │   ├── core/                 batchsmith_core 静态库 —— 只依赖 Qt6::Core
 │   ├── cli/                  bs
-│   └── gui/                  batchsmith（Qt 6 Widgets）
+│   └── gui/                  batchsmith_gui 静态库 + 瘦 main.cpp
+│       └── table|editor|result/   列表区 / 表达式条 / 输出区
 ├── presets/                  示例预设
-└── tests/                    单元测试
+└── tests/                    core 单测 + GUI 离屏测试
 ```
 
 `src/core` **只依赖 QtCore**，不引用 QtGui/QtWidgets。这样 core 可以在无图形环境下单测，也为将来更换 GUI 框架留出余地。
