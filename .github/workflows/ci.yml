@@ -32,7 +32,12 @@ jobs:
         include:
           - name: Windows x64
             os: windows-latest
-            qt_arch: win64_msvc2022_64
+            # ⚠ 必须用 msvc2019_64：Qt 6.7.2 的 Windows 包只有
+            #   win64_msvc2019_64 / win64_msvc2019_arm64 / win64_mingw / win64_llvm_mingw，
+            #   **不存在 msvc2022_64**（该后缀到 Qt 6.8 才出现）。
+            #   写错的话 install-qt-action 会在下载前就失败，与代码无关。
+            #   msvc2019_64 的二进制与 VS2022 是 ABI 兼容的，windows-latest 上直接用。
+            qt_arch: win64_msvc2019_64
             script: packaging/package-windows.sh
           - name: macOS universal
             os: macos-latest
@@ -103,7 +108,27 @@ jobs:
           cmake --preset ci "${extra[@]}"
 
       - name: 构建
-        run: cmake --build --preset ci --parallel
+        shell: bash
+        run: |
+          # 构建输出落盘，失败时把关键行提升为 GitHub 注解。
+          #
+          # 这么做的理由：**job 日志必须用仓库写权限才能下载**
+          # （GET /actions/jobs/<id>/logs 匿名请求返回
+          #  "Must have admin rights to Repository."），
+          # 而 check-run 的注解是匿名可读的。把编译器错误做成注解，
+          # 没有凭据的一方也能直接定位失败原因，不必再让人手工贴日志。
+          if cmake --build --preset ci --parallel > /tmp/build.log 2>&1; then
+            tail -3 /tmp/build.log
+            exit 0
+          fi
+
+          echo "构建失败。关键行："
+          grep -nE 'error:|error [A-Z]+[0-9]+:|fatal error|undefined reference|cannot find|FAILED:' /tmp/build.log \
+            | head -20 | while IFS= read -r line; do echo "::error::$line"; done
+
+          echo "----- 日志末尾 15 行 -----"
+          tail -15 /tmp/build.log | while IFS= read -r line; do echo "::warning::$line"; done
+          exit 1
 
       # 测试只链接 core，不需要图形环境
       - name: 测试

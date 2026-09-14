@@ -1,7 +1,9 @@
 # ===========================================================================
-# 第三方依赖（全部 vendored 在仓库内，构建期不需要联网）
+# 第三方依赖
 #
-# 每个依赖都锁定在 third_party/README.md 记录的版本。
+# 各依赖以 git submodule 形式锁定在 third_party/README.md 记录的 tag 上，
+# 仓库自身不含上游代码（只有四行 gitlink）。clone 需要 --recursive。
+#
 # 这些 target 不链接 batchsmith_warnings，因此本项目的严格警告策略不会
 # 打进第三方代码，避免为了迁就上游写法而关掉自己的检查。
 # ===========================================================================
@@ -11,30 +13,45 @@
 # ---------------------------------------------------------------------------
 file(GLOB _lua_all_sources CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/lua/*.c")
 
-# 必须排除三个文件，它们各自都带"可执行入口"：
+# 必须排除的非库文件。
+#
+# 注意 lua/lua 的 GitHub 镜像仓库（也就是我们现在用的 submodule 来源）
+# 比 lua.org 的官方发行 tarball **多带几个文件** —— ltests.c 就是随
+# submodule 迁移悄悄混进来的，官方 src/ 里没有它。
+#
 #   lua.c    —— 官方解释器（Windows 下定义 WinMain，其它平台定义 main）
 #   luac.c   —— 官方编译器（定义 main）
 #   onelua.c —— 单文件合并版，它 #include 了全部源文件**并且自带解释器入口**。
 #               逐文件编译时混进它，不但重复定义全部符号，还会在 Windows 下
 #               把 GUI 的入口点抢走 —— 症状极具迷惑性：
 #               batchsmith.exe 照常启动、退出码 0，但跑的其实是 Lua REPL。
-list(FILTER _lua_all_sources EXCLUDE REGEX "/(lua|luac|onelua)\\.c$")
+#   ltests.c —— Lua 内部的测试模块（luaB_opentests / lua_checkmemory 等）。
+#               它在静态库里是一颗"哑弹"：静态库只按需拉取目标文件，所以它
+#               既不会被链进产物、也不会报错，却对外暴露一批符号，并且引用了
+#               ltable.c 只在 LUA_DEBUG 下才编译的函数（luaH_getnode 等）——
+#               哪天有谁把它拉进来，就是一堆未定义符号。
+set(_lua_excluded_sources lua.c luac.c onelua.c ltests.c)
+list(FILTER _lua_all_sources EXCLUDE REGEX "/(lua|luac|onelua|ltests)\\.c$")
 
-# 防御性复核：上面这条过滤一旦失效，后果是静默的，所以显式断言一次。
-foreach(_lua_src IN LISTS _lua_all_sources)
-    get_filename_component(_lua_name "${_lua_src}" NAME)
-    if(_lua_name STREQUAL "lua.c" OR _lua_name STREQUAL "luac.c" OR _lua_name STREQUAL "onelua.c")
-        message(FATAL_ERROR
-            "Lua 源列表里混入了 ${_lua_name}。\n"
-            "这三个文件都含可执行入口，进库会让 GUI 链接到错误的入口点。")
-    endif()
+# 防御性复核：上面这条过滤一旦失效，后果是静默的（见 onelua.c 那次的教训），
+# 所以逐个文件名显式断言一次，不依赖正则本身写对。
+foreach(_lua_banned IN LISTS _lua_excluded_sources)
+    foreach(_lua_src IN LISTS _lua_all_sources)
+        get_filename_component(_lua_name "${_lua_src}" NAME)
+        if(_lua_name STREQUAL _lua_banned)
+            message(FATAL_ERROR
+                "Lua 源列表里混入了 ${_lua_banned}。\n"
+                "这些文件含可执行入口或测试代码，进库会导致入口点被抢占、"
+                "或留下未定义符号。请检查上面的排除规则。")
+        endif()
+    endforeach()
 endforeach()
 
 add_library(lua54 STATIC ${_lua_all_sources})
 add_library(batchsmith::lua ALIAS lua54)
 
 list(LENGTH _lua_all_sources _lua_count)
-message(STATUS "  Lua 编译单元    : ${_lua_count} 个源文件（已排除 lua.c / luac.c / onelua.c）")
+message(STATUS "  Lua 编译单元    : ${_lua_count} 个源文件（已排除 lua.c / luac.c / onelua.c / ltests.c）")
 
 target_include_directories(lua54 SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/lua")
 

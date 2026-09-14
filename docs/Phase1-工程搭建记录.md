@@ -311,6 +311,9 @@ list(FILTER _lua_all_sources EXCLUDE REGEX "/(lua|luac|onelua)\\.c$")
 并加了显式断言逐项复核文件名 —— 因为这条路径失败时是静默的，不能只靠正则。
 Lua 的编译单元数从 34 降到 **33**（CMake 配置时会打印，可当作回归检查点）。
 
+> 后来这个数字又降到 **32**：submodule 迁移带来的一颗"哑弹" `ltests.c` 也被排除了，
+> 见下文 S6 的 [「另一个随 submodule 迁移混进来的东西」](#另一个随-submodule-迁移混进来的东西ltestsc)。
+
 ### 运行产物前的 PATH（构建目录不带运行时 DLL，直接双击会缺库）
 
 | 来源 | 提供 |
@@ -357,6 +360,17 @@ packaging/
 
 效果：默认部署 56.2 MB → 精简 27.8 MB → **zip 11.45 MB**。
 
+**不假设 `windeployqt` 在 `PATH` 上。** 初版脚本直接调 `windeployqt`，等于押注
+`install-qt-action` 会把 Qt 的 bin 加进 `PATH` —— 那是 CI 内部行为、本机无法复现，
+一旦它变了，失败点会跑到流程**末尾**（打包阶段），白白多一轮 CI。
+现在优先用 action 显式导出的 `QT_ROOT_DIR`（在 job 日志的 env 段里能看到它），
+`PATH` 只作回退，两路都断就带明确提示退出。`package-macos.sh` 的 `macdeployqt` 同样处理
+（那个脚本至今没在真机跑过，更不该有这类隐藏假设）。
+
+三条分支都在本机实测过（用独立 fixture 目录区分"命中 `QT_ROOT_DIR`"与"命中 `PATH`"）：
+`QT_ROOT_DIR` 有工具 → 命中它；未设置 → 回退 `PATH`；`QT_ROOT_DIR` 下没有 → 回退 `PATH`；
+两路皆无 → 报错退出 1。
+
 ### ⚠️ 打包脚本踩到的坑（Git Bash 特有）
 
 **症状**：`windeployqt` 只回一句
@@ -396,7 +410,7 @@ macOS 与 Linux 脚本只做了 `bash -n` 语法检查，**未在真机跑过** 
 
 ---
 
-## S6 CI：三平台构建 + 打包 + 发版 ⬜ 待首次推送验证
+## S6 CI：三平台构建 + 打包 + 发版 🔄 首轮失败已修复，待复验
 
 `.github/workflows/ci.yml`。三个作业：`build`（矩阵）、`release`（打 tag 时）、`format`。
 
@@ -426,8 +440,111 @@ macOS 与 Linux 脚本只做了 `bash -n` 语法检查，**未在真机跑过** 
 
 - macOS 产物**必须在 macOS 上构建**，公开分发还要签名与公证。
 - 三平台都要真机冒烟验证。**"只在 Windows 开发完直接编其他平台"是 Qt 项目的经典翻车点。**
-- 当前**未经真实推送验证**。首次推送后要盯三个平台各自走通，尤其 macOS 的 universal
-  构建与 Linux 的系统依赖列表。
+- 首次推送后三平台结果差异极大（见下节），**不能因为本机是绿的就把 CI 当绿的**。
+
+### 首次推送后的真实结果（2026-09-14）
+
+推送 `e126e66` 后 CI 自动跑了一轮，三平台结果如下：
+
+| Job | 结果 | 失败位置 |
+|---|---|---|
+| 代码格式 | ✅ | — |
+| Linux x86_64 | ✅ **全绿**（含打包与上传） | — |
+| Windows x64 | ❌ | 第 3 步「安装 Qt」——`install-qt-action` 找不到 `win64_msvc2022_64` |
+| macOS universal | ❌ | 第 9 步「构建」——`ld: framework 'AGL' not found` |
+
+顺带一个好收获：**Linux 全绿同时验证了 `package-linux.sh` 真的能用** ——
+它此前只做过 `bash -n` 语法检查，没有真机跑过。
+
+两个失败都与功能代码无关，但都必须在工程上解决。
+
+#### ① Windows：`win64_msvc2022_64` 这个 Qt 包不存在
+
+**这条是用与 CI 相同的工具复现确认的，不是推断。** 本机装同版本 aqt（`aqtinstall==3.3.0`，
+与 workflow 里的 `aqtversion: ==3.3.*` 对齐）后：
+
+```bash
+python -m aqt list-qt windows desktop --arch 6.7.2
+#  -> win64_llvm_mingw win64_mingw win64_msvc2019_64 win64_msvc2019_arm64
+
+python -m aqt install-qt windows desktop 6.7.2 win64_msvc2022_64 --outputdir /tmp/x
+#  -> ERROR : The packages ['qt_base'] were not found while parsing XML of package information!
+#     与 CI 日志逐字一致
+
+python -m aqt install-qt windows desktop 6.7.2 win64_msvc2019_64 --dry-run --outputdir /tmp/x
+#  -> DRY RUN: 7 个包（qtbase/qtsvg/qtdeclarative/qttools/qttranslations/d3dcompiler_47/opengl32sw）
+```
+
+另外抓官方清单核对过（`download.qt.io/.../qt6_672/Updates.xml`）：Qt 6.7.2 的 Windows
+包只有 `win64_msvc2019_64` / `win64_msvc2019_arm64` / `win64_mingw` / `win64_llvm_mingw`，
+**没有 `msvc2022_64`** —— 那个后缀到 **6.8.0** 才出现（`aqt list-qt ... --arch 6.8.0`
+可以对照）。也就是说失败发生在下载 Qt 之前，与工作区的任何一行代码无关。
+已改为 `win64_msvc2019_64`（与 VS2022 的 ABI 兼容，`windows-latest` 直接可用），
+并用 `--dry-run` 验证过这个包确实能装。
+
+> `The packages ['qt_base'] were not found` 就是"arch 名在仓库里不存在"的标准症状 ——
+> 看到它别去查 `qt_base`，去查 arch 名字。
+
+#### ② macOS：`-framework AGL` 来自 Qt 自己
+
+**根因不在我们这边。** `Qt6::Gui` 的公开链接依赖里带着 AGL，来源是 Qt 自带的
+`FindWrapOpenGL.cmake`（非商业发行版在 6.9 之前都含这段）：
+
+```cmake
+find_library(WrapOpenGL_AGL NAMES AGL)
+if(WrapOpenGL_AGL)
+    set(__opengl_agl_fw_path "${WrapOpenGL_AGL}")
+endif()
+if(NOT __opengl_agl_fw_path)
+    set(__opengl_agl_fw_path "-framework AGL")   # ← 问题所在
+endif()
+target_link_libraries(WrapOpenGL::WrapOpenGL INTERFACE ${__opengl_agl_fw_path})
+```
+
+AGL 是 Carbon 时代的 OpenGL 垫片，已从 macOS 26（Tahoe）的 SDK 中移除。
+在旧 SDK 上 `find_library` 能拿到真实路径，所以这个缺陷潜伏了很多年；
+一旦 SDK 里没有 AGL，它就回退成**字面量** `-framework AGL`，
+于是任何链接 `Qt6::Gui` 的程序都在链接期失败。Qt 官方在 6.9 里把整段删掉了。
+
+**做法**：在 `cmake/FindWrapOpenGL.cmake` 放一份 Qt 该模块的副本（BSD-3-Clause 版权
+声明按原样保留），**只删掉 AGL 那一段**，与上游 6.9 的修复逐行对应；顶层
+`CMakeLists.txt` 用 `list(PREPEND CMAKE_MODULE_PATH ...)` 让我们的副本排在 Qt 自带副本之前。
+
+**为什么这样能生效 —— 本机实测，不是推测。** 关键在于 `Qt6Config.cmake` 是用
+`list(APPEND ...)` 追加自己的模块目录的，所以 PREPEND 进来的 `cmake/` 一定在前面。
+用 `cmake --debug-find-pkg=WrapOpenGL` 能直接看到结论：
+
+```
+find_package considered the following paths for FindWrapOpenGL.cmake:
+  C:/Qt/Tools/CMake_64/share/cmake-3.29/Modules/FindWrapOpenGL.cmake
+The file was found at
+  D:/Development/BatchSmith/cmake/FindWrapOpenGL.cmake
+```
+
+与 Qt 原版逐行 diff 过，**实质差异只有被删掉的 AGL 那 8 行**（加一段说明注释）。
+
+**同时加了一道配置期断言**：`find_package(Qt6)` 之后检查 `WrapOpenGL::WrapOpenGL`
+的链接接口，若仍有 AGL 就立刻 `FATAL_ERROR`。因为这个方案的全部依仗就是"模块搜索顺序"，
+一旦有人把 PREPEND 改成 APPEND，症状会退化成十几分钟一次的 CI 往返 + 一条离根因很远的
+`ld` 报错。断言把这件事变成 5 秒钟的配置期错误（两条分支都在本机用伪目标验过）。
+
+**顺带硬化**：`-Werror` 现在只在**已验证过警告集**的编译器上开启（目前只有 GCC）。
+MSVC 的 `/W4` 与 AppleClang 各有一批自己的告警，给它们改成"警告照打、不阻断构建" ——
+CI 的红应该只反映真实问题，而不是"某个编译器恰好多了一条告警"。
+
+#### 另一个随 submodule 迁移混进来的东西：`ltests.c`
+
+首次 CI 日志里出现了 `Building C object ...third_party/.../lua/ltests.c.o`。
+`ltests.c` 是 Lua 内部的测试模块（`luaB_opentests` / `lua_checkmemory` 等），
+**`lua.org` 官方发行 tarball 的 `src/` 里没有它 —— 它是 `lua/lua` 这个 GitHub 镜像
+仓库多带的文件**，随 submodule 迁移悄悄进了编译列表。
+
+它在静态库里是一颗"哑弹"：静态库只按需拉取目标文件，所以它既不会被链进产物、
+也不会报错；但它对外暴露一批符号，并且引用了 `ltable.c` 只在 `LUA_DEBUG` 下才编译的
+函数（`luaH_getnode` 等）—— 哪天有谁把它拉进来，就是一堆未定义符号。
+
+现在排除列表从 3 个变成 4 个（`lua.c` / `luac.c` / `onelua.c` / `ltests.c`），
+Lua 编译单元数 **34 → 32**，配置阶段会打印这个数字。
 
 ---
 

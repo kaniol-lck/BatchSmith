@@ -59,8 +59,14 @@ git add third_party/<name>
 **doctest 那一行最容易写错**：它的头文件在仓库根的 `doctest/` 子目录下，
 所以 include 目录是**仓库根**而不是 `include/`。
 
-另外 Lua 的构建需要排除 `lua.c` / `luac.c`（官方解释器与编译器的 `main()`），
-见 `CMakeLists.txt` 里的 `list(FILTER ... EXCLUDE REGEX ...)`。
+另外 Lua 的构建需要排除 **4 个非库文件**：`lua.c` / `luac.c`（官方解释器与编译器的
+`main()`）、`onelua.c`（单文件合并版，自带解释器入口，在 Windows 下会抢走 GUI 的入口点）、
+`ltests.c`（Lua 的内部测试模块）。见 `CMakeLists.txt` 里的 `list(FILTER ... EXCLUDE REGEX ...)`。
+
+> ⚠️ **`lua/lua` 的 GitHub 镜像仓库比官方发行 tarball 多带文件。**
+> `ltests.c` 与 `onelua.c` 都不在 `lua.org` 的 `src/` 里，却都在这个镜像仓库的根目录下 ——
+> 因为 `file(GLOB .../lua/*.c)` 会把它们一起捞进来，所以排除列表必须跟着这份清单走，
+> 而不只是照着上游的 Makefile。
 
 ## 为什么是 submodule
 

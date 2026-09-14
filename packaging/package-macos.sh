@@ -4,7 +4,7 @@
 #
 # 用法: VERSION=0.1.0 packaging/package-macos.sh <build-dir> <out-dir>
 #
-# 依赖 macdeployqt（由 install-qt-action 放进 PATH）。
+# 依赖 macdeployqt（Qt 自带）与 hdiutil（系统自带）。
 #
 # ⚠ 这里产出的是**未签名**的 dmg。Gatekeeper 会拦，用户需要右键打开或
 #    `xattr -dr com.apple.quarantine /Applications/BatchSmith.app`。
@@ -30,7 +30,21 @@ cp -R "$APP" "$stage/"
 cp "$CLI_BIN" "$stage/bs"          # CLI 不作 .app，直接放在 dmg 根下
 cp README.md LICENSE "$stage/" 2>/dev/null || true
 
-macdeployqt "$stage/batchsmith.app" -always-overwrite
+# 定位 macdeployqt：优先 install-qt-action 导出的 QT_ROOT_DIR，PATH 只作回退。
+# 理由同 Windows 脚本 —— 不押注 CI 内部会替我们把 Qt 的 bin 加进 PATH。
+# 这个脚本从未在真机跑过（首次 CI 就死在链接阶段），所以更不该有这类隐藏假设。
+MACDEPLOYQT=""
+if [[ -n "${QT_ROOT_DIR:-}" && -x "${QT_ROOT_DIR}/bin/macdeployqt" ]]; then
+    MACDEPLOYQT="${QT_ROOT_DIR}/bin/macdeployqt"
+elif command -v macdeployqt >/dev/null 2>&1; then
+    MACDEPLOYQT="$(command -v macdeployqt)"
+else
+    echo "找不到 macdeployqt：既不在 \$QT_ROOT_DIR（当前为 '${QT_ROOT_DIR:-未设置}'）下，也不在 PATH 上。" >&2
+    exit 1
+fi
+echo "macdeployqt: $MACDEPLOYQT"
+
+"$MACDEPLOYQT" "$stage/batchsmith.app" -always-overwrite
 
 dmg="$OUT_DIR/BatchSmith-${VERSION}-macos-universal.dmg"
 rm -f "$dmg"

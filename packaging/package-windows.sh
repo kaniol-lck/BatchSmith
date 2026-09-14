@@ -4,7 +4,7 @@
 #
 # 用法: VERSION=0.1.0 packaging/package-windows.sh <build-dir> <out-dir>
 #
-# 依赖 windeployqt（由 install-qt-action 放进 PATH）与 7z（GitHub Windows runner 自带）。
+# 依赖 windeployqt（Qt 自带）与 7z / python（打 zip 用，见文末的回退链）。
 
 set -euo pipefail
 
@@ -35,13 +35,39 @@ rm -rf "$stage"
 mkdir -p "$stage"
 cp "$GUI_EXE" "$CLI_EXE" "$stage/"
 
+# 定位 Qt 的部署工具。**不假设它在 PATH 上。**
+# 原写法是直接调 `windeployqt`，等于押注 install-qt-action 会把 Qt 的 bin 加进 PATH。
+# 那是 CI 内部行为、本机无法复现；一旦它变了，失败点会跑到流程末尾（打包阶段），
+# 白白多一轮 CI。而 install-qt-action 确实导出 `QT_ROOT_DIR`（macOS 那次 CI 日志的
+# env 段里就有），所以这里优先用它，PATH 只作为回退。
+resolve_qt_tool() {   # $1 = 相对 QT_ROOT_DIR 的路径；$2 = 命令名
+    local root="${QT_ROOT_DIR:-}"
+    if [[ -n "$root" ]]; then
+        # QT_ROOT_DIR 在 Windows runner 上是 `D:\a\...` 这种形态，转成 MSYS 可执行的路径
+        command -v cygpath >/dev/null 2>&1 && root="$(cygpath -u "$root")"
+        if [[ -x "$root/$1" ]]; then
+            printf '%s\n' "$root/$1"
+            return 0
+        fi
+    fi
+    if command -v "$2" >/dev/null 2>&1; then
+        command -v "$2"
+        return 0
+    fi
+    echo "找不到 $2：既不在 \$QT_ROOT_DIR（当前为 '${QT_ROOT_DIR:-未设置}'）下，也不在 PATH 上。" >&2
+    return 1
+}
+
+WINDEPLOYQT="$(resolve_qt_tool bin/windeployqt.exe windeployqt.exe)" || exit 1
+echo "windeployqt: $WINDEPLOYQT"
+
 # 精简部署。四个开关都是实测得出的（技术方案 §5.1）：
 #   默认部署 56.2MB -> 精简后 27.8MB -> 压缩后 11.7MB
 #   --no-opengl-sw         省掉 opengl32sw.dll 19.7MB（Widgets 不走 OpenGL）
 #   --no-translations      省掉全量翻译 4.8MB
 #   --no-system-d3d-compiler 省掉 D3Dcompiler_47.dll 4.0MB
 #   --no-compiler-runtime  省掉 VC 运行时（目标机通常已装；若目标机没有，去掉这一条）
-windeployqt \
+"$WINDEPLOYQT" \
     --release \
     --no-translations \
     --no-opengl-sw \
