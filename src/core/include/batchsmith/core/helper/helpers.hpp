@@ -1,10 +1,19 @@
 #pragma once
 
+#include <QStringList>
+
 namespace batchsmith::core::sandbox {
 class Sandbox;
 }
 
 namespace batchsmith::core::helper {
+
+/// 实际注册进沙箱的工具函数名（按注册顺序）。
+///
+/// 存在的理由是**可校验**：帮助文档里写了哪些函数，与这里实际注册了哪些，
+/// 必须完全一致（`tests/core/test_cheatsheet.cpp` 做双向比对）。
+/// 少了这个出口，"文档漏写一个新的 helper" 就只能靠人肉 review 发现。
+[[nodiscard]] QStringList registered_names();
 
 /// 把 DSL 的 helper 集合注册进沙箱 env（技术方案 §3.5 的六类函数）。
 ///

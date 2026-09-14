@@ -79,6 +79,32 @@ echo "windeployqt: $WINDEPLOYQT"
 # 随附许可与说明（GPL 分发要求）
 cp README.md LICENSE "$stage/" 2>/dev/null || true
 
+# ---------------------------------------------------------------------------
+# 帮助手册随包分发
+#
+#   HTML 手册：三平台都附 —— 用浏览器就能看，离线可用
+#   CHM 手册：Windows 原生帮助格式（双击即看、带左侧目录树），
+#            由 packaging/make-chm.sh 生成；没生成就跳过，不算失败
+#
+# 两份内容与界面「帮助」窗口同源（`bs cheatsheet --html / --hhc` 渲染自 core 数据），
+# 所以随包手册不会与程序实际支持的语法脱节。
+# ---------------------------------------------------------------------------
+if [[ -x "$CLI_EXE" ]]; then
+    if "$CLI_EXE" cheatsheet --html > "$stage/BatchSmith-帮助手册.html" 2>/dev/null; then
+        echo "  已附 HTML 手册"
+    else
+        rm -f "$stage/BatchSmith-帮助手册.html"
+        echo "  警告：HTML 手册生成失败，已跳过" >&2
+    fi
+fi
+for _chm in "$BUILD_DIR"/chm-work/*.chm "$OUT_DIR"/*.chm; do
+    if [[ -f "$_chm" ]]; then
+        cp "$_chm" "$stage/"
+        echo "  已附 CHM 手册：$(basename "$_chm")"
+        break
+    fi
+done
+
 archive="$OUT_DIR/BatchSmith-${VERSION}-windows-x64.zip"
 rm -f "$archive"
 

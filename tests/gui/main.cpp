@@ -20,5 +20,11 @@ int main(int argc, char** argv) {
         return capture_ui_shot(QString::fromLocal8Bit(shotPath));
     }
 
+    // 帮助对话框另存一张：内容较长，单独渲染才看得清排版
+    const QByteArray helpShotPath = qgetenv("BATCHSMITH_HELP_SHOT");
+    if (!helpShotPath.isEmpty()) {
+        return capture_help_shot(QString::fromLocal8Bit(helpShotPath));
+    }
+
     return doctest::Context(argc, argv).run();
 }

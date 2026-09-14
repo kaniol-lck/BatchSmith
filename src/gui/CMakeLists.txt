@@ -14,6 +14,8 @@ add_library(batchsmith_gui STATIC
     src/MainWindow.h
     editor/ExpressionBar.cpp
     editor/ExpressionBar.h
+    help/CheatsheetDialog.cpp
+    help/CheatsheetDialog.h
     result/ResultPanel.cpp
     result/ResultPanel.h
     table/ListSourceColumn.cpp

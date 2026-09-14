@@ -16,3 +16,10 @@
 ///
 /// @return 进程退出码（0 = 成功写出图片）
 int capture_ui_shot(const QString& path);
+
+/// 把「帮助 → DSL 语法与函数速查」对话框渲染成 PNG，供人工核对内容与排版。
+///
+/// ```bash
+/// QT_QPA_PLATFORM=offscreen BATCHSMITH_HELP_SHOT=/tmp/help.png ./batchsmith_gui_tests
+/// ```
+int capture_help_shot(const QString& path);

@@ -106,6 +106,16 @@ ctest --preset default
 ```bash
 export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
 ./build/windows-mingw/bin/bs.exe --version
+
+# 表达式求值（只跑编译与沙箱求值，不接触文件系统）
+./build/windows-mingw/bin/bs.exe eval --list list1=报告A,报告B --list list2=1,2 \
+    -- 'mv $list1[i]$ out/$list2[i]$'
+
+# 语法与函数速查（与界面「帮助 → DSL 语法与函数速查」同一份内容）
+./build/windows-mingw/bin/bs.exe cheatsheet
+
+# 导出成单文件帮助手册（HTML 任何平台都能看；CHM 是 Windows 的原生帮助格式）
+./build/windows-mingw/bin/bs.exe cheatsheet --html > BatchSmith-帮助手册.html
 ```
 
 **GUI**（`batchsmith`）——同样需要上述 `PATH`：
@@ -124,6 +134,9 @@ export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
 > ```
 >
 > 详见 [`docs/Phase1-工程搭建记录.md`](docs/Phase1-工程搭建记录.md) 的 S5。
+>
+> 打包脚本会**随包附上帮助手册**：三平台都附 HTML（浏览器可直接打开），
+> Windows 另外附 CHM（需先生成，见 `packaging/make-chm.sh`）。
 
 ## 目录结构
 
@@ -139,7 +152,7 @@ BatchSmith/
 │   ├── core/                 batchsmith_core 静态库 —— 只依赖 Qt6::Core
 │   ├── cli/                  bs
 │   └── gui/                  batchsmith_gui 静态库 + 瘦 main.cpp
-│       └── table|editor|result/   列表区 / 表达式条 / 输出区
+│       └── help|table|editor|result/  速查对话框 / 列表区 / 表达式条 / 输出区
 ├── presets/                  示例预设
 └── tests/                    core 单测 + GUI 离屏测试
 ```

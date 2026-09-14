@@ -9,6 +9,7 @@
 #include <QWidget>
 
 #include "MainWindow.h"
+#include "help/CheatsheetDialog.h"
 
 namespace {
 
@@ -54,4 +55,12 @@ int capture_ui_shot(const QString& path) {
     QApplication::processEvents();
 
     return window.grab().save(path) ? 0 : 1;
+}
+
+int capture_help_shot(const QString& path) {
+    CheatsheetDialog dialog;
+    dialog.resize(820, 640);
+    dialog.show();
+    QApplication::processEvents();
+    return dialog.grab().save(path) ? 0 : 1;
 }

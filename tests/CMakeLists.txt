@@ -10,6 +10,7 @@
 
 add_executable(batchsmith_tests
     main.cpp
+    core/test_cheatsheet.cpp
     core/test_compiler.cpp
     core/test_engine.cpp
     core/test_natural_compare.cpp
@@ -39,6 +40,7 @@ add_test(NAME batchsmith.unit
 if(BATCHSMITH_BUILD_GUI)
     add_executable(batchsmith_gui_tests
         gui/main.cpp
+        gui/test_cheatsheet_dialog.cpp
         gui/test_main_window.cpp
         gui/ui_shot.cpp
         gui/ui_shot.hpp)
@@ -47,6 +49,13 @@ if(BATCHSMITH_BUILD_GUI)
         PRIVATE
             BatchSmith::Gui
             batchsmith::doctest)
+
+    # 界面库把子目录里的头文件按 "help/xxx.h"、"table/xxx.h" 组织，而 src/gui
+    # 这个根只在库内部可见。测试要按对象名去查内部控件、并直接构造这些控件，
+    # 所以这里单独补上 —— 只影响测试目标，不改变库的对外可见性。
+    target_include_directories(batchsmith_gui_tests
+        PRIVATE
+            "${CMAKE_SOURCE_DIR}/src/gui")
 
     target_link_libraries(batchsmith_gui_tests PRIVATE batchsmith_warnings)
 

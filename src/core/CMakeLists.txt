@@ -18,6 +18,8 @@ configure_file(
 
 add_library(batchsmith_core STATIC
     src/version.cpp
+    src/dsl/cheatsheet.cpp
+    src/dsl/cheatsheet_html.cpp
     src/dsl/compiler.cpp
     src/dsl/engine.cpp
     src/dsl/template_scanner.cpp

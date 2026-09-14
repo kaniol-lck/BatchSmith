@@ -147,6 +147,22 @@ jobs:
             exit 1
           fi
 
+      # CHM 帮助手册（Windows 原生帮助格式：双击即看、带左侧目录树）
+      #
+      # 放在「打包」之前，这样 package-windows.sh 会把它一起打进 zip。
+      # hhc.exe 从 HTML Help Workshop 的自解压 CAB 里直接取出 —— 不跑安装器、
+      # 不改注册表、不需要管理员（微软官方下载已下线，细节见 packaging/fetch-hhc.sh）。
+      #
+      # continue-on-error：拿不到工具不该让整个 CI 变红。CHM 是锦上添花，
+      # 三个平台的包里都已经附了 HTML 手册（浏览器可直接打开）。
+      - name: 生成 CHM 帮助手册
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: bash
+        run: |
+          bash packaging/fetch-hhc.sh build/chm/tools
+          VERSION="${{ env.VERSION }}" bash packaging/make-chm.sh "$PWD/build/ci" "$PWD/dist"
+
       - name: 打包
         shell: bash
         env:

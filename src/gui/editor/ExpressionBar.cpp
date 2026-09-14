@@ -9,7 +9,9 @@
 ExpressionBar::ExpressionBar(QWidget* parent) : QWidget(parent) {
     m_input = new QLineEdit(this);
     m_input->setObjectName(QStringLiteral("expressionInput"));
-    m_input->setPlaceholderText(QStringLiteral("输入表达式，例如：$list1$   或  mv $list1$ out"));
+    // 提示要写当前语法（区段里是 Lua），而不是早期"只认列表名"的那套写法
+    m_input->setPlaceholderText(QStringLiteral(
+            "$ 里写 Lua 表达式，例如 mv $list1[i]$ out/$list2[i]$；按 F1 查看语法与函数"));
     m_input->setClearButtonEnabled(true);
     connect(m_input, &QLineEdit::returnPressed, this, &ExpressionBar::emitSubmitted);
     connect(m_input, &QLineEdit::textChanged, this, [this](const QString& text) {
@@ -38,7 +40,7 @@ ExpressionBar::ExpressionBar(QWidget* parent) : QWidget(parent) {
     layout->addLayout(inputLayout);
     layout->addWidget(m_message);
 
-    showHint(QStringLiteral("回车或点「确定」计算输出列表"));
+    showHint(QStringLiteral("回车或点「确定」计算输出列表；按 F1 查看语法与函数"));
 }
 
 QString ExpressionBar::expression() const {

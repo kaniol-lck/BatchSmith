@@ -13,6 +13,7 @@
 #include <QCoreApplication>
 #include <QTextStream>
 
+#include "batchsmith/core/dsl/cheatsheet.hpp"
 #include "batchsmith/core/dsl/compiler.hpp"
 #include "batchsmith/core/dsl/engine.hpp"
 #include "batchsmith/core/list/list_source.hpp"
@@ -43,6 +44,10 @@ void print_plan() {
         << "可用子命令：\n"
         << "  bs eval <模板> [--list 名=值1,值2]… [--ignore 名]… [--show-lua]\n"
         << "        只跑 DSL 编译与沙箱求值，**不接触文件系统**。输出为逐行结果。\n"
+        << "  bs cheatsheet [--html | --hhc]\n"
+        << "        打印 DSL 语法、工具函数与示例（与界面的「帮助」同一份内容）；\n"
+        << "        --html 输出可独立打开的 HTML 手册；\n"
+        << "        --hhc  输出 CHM 的目录文件（配 packaging/make-chm.sh 打 .chm）。\n"
         << "\n"
         << "尚未实现（见 docs/技术方案与实现路线.md §7）：\n"
         << "  bs plan  <预设> --bind k=v   生成 Plan 并打印 diff，不产生任何副作用（Phase 3）\n"
@@ -184,18 +189,25 @@ int main(int argc, char* argv[]) {
                                         QStringLiteral("名")));
     parser.addOption(QCommandLineOption(QStringLiteral("show-lua"),
                                         QStringLiteral("同时打印编译出的 Lua 源码。")));
+    parser.addOption(QCommandLineOption(QStringLiteral("html"),
+                                        QStringLiteral("cheatsheet：输出 HTML 手册"
+                                                       "（可用浏览器打开、便于分发）。")));
+    parser.addOption(QCommandLineOption(
+            QStringLiteral("hhc"), QStringLiteral("cheatsheet：输出 CHM 的目录文件（.hhc）。")));
     parser.addPositionalArgument(QStringLiteral("命令"),
                                  QStringLiteral("eval；或省略以查看用法。"));
 
     parser.process(app);
 
-    QTextStream& out = out_stream();
-    out << QString::fromLatin1(batchsmith::core::version_banner()) << "\n";
+    // banner 走 **stderr**：stdout 只放真正的输出。
+    // 否则 `bs eval … | wc -l` 会莫名多出一行，脚本消费结果时很难发现原因
+    // （banner 是诊断信息，不是数据）。
+    err_stream() << QString::fromLatin1(batchsmith::core::version_banner()) << "\n";
 
     const QStringList positional = parser.positionalArguments();
     if (positional.isEmpty()) {
         print_plan();
-        out.flush();
+        out_stream().flush();
         return kExitUsage;
     }
 
@@ -203,9 +215,23 @@ int main(int argc, char* argv[]) {
     if (command == QStringLiteral("eval")) {
         return run_eval(parser);
     }
+    if (command == QStringLiteral("cheatsheet") || command == QStringLiteral("help")) {
+        // 与界面「帮助 → DSL 语法与函数速查」渲染的是**同一份数据**
+        QTextStream& out = out_stream();
+        if (parser.isSet(QStringLiteral("hhc"))) {
+            // 给 CHM 用的目录文件：由同一份数据生成，不手工维护
+            out << batchsmith::core::dsl::cheatsheet_hhc();
+        } else if (parser.isSet(QStringLiteral("html"))) {
+            out << batchsmith::core::dsl::cheatsheet_html() << "\n";
+        } else {
+            out << batchsmith::core::dsl::cheatsheet_text() << "\n";
+        }
+        out.flush();
+        return kExitOk;
+    }
 
     err_stream() << QStringLiteral("未知子命令：%1\n").arg(command);
     print_plan();
-    out.flush();
+    out_stream().flush();
     return kExitUsage;
 }

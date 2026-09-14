@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <iterator>
 
 #include <QRegularExpression>
 #include <QStringList>
@@ -684,6 +685,15 @@ constexpr Helpers kHelpers[] = {
 };
 
 }  // namespace
+
+QStringList registered_names() {
+    QStringList names;
+    names.reserve(static_cast<qsizetype>(std::size(kHelpers)));
+    for (const Helpers& helper : kHelpers) {
+        names.append(QString::fromLatin1(helper.name));
+    }
+    return names;
+}
 
 void register_helpers(Sandbox& sandbox) {
     lua_State* state = sandbox.state();
