@@ -2,7 +2,7 @@
 
 把**多个列表 + 一个输出表达式**编译成批量操作。配置一次预设，之后只需选择文件。
 
-> 当前版本：**0.2.0**（P1 已完成；主界面已按「上下两段」落地，核心表达式内核尚在 Phase 2）。
+> 当前版本：**0.3.0**（P1 工程链路、P2 表达式内核均已完成；界面与 CLI 都能跑真实表达式）。
 > 变更记录见 [`CHANGELOG.md`](CHANGELOG.md)。
 >
 > - 阶段路线图：[`docs/项目阶段规划.md`](docs/项目阶段规划.md)（Phase 1–8）
@@ -120,7 +120,7 @@ export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
 > 要一份可分发的完整包，直接用打包脚本：
 >
 > ```bash
-> VERSION=0.2.0 bash packaging/package-windows.sh "$PWD/build/windows-mingw-release" "$PWD/dist"
+> VERSION=0.3.0 bash packaging/package-windows.sh "$PWD/build/windows-mingw-release" "$PWD/dist"
 > ```
 >
 > 详见 [`docs/Phase1-工程搭建记录.md`](docs/Phase1-工程搭建记录.md) 的 S5。

@@ -10,8 +10,10 @@
 
 add_executable(batchsmith_tests
     main.cpp
+    core/test_compiler.cpp
+    core/test_engine.cpp
     core/test_natural_compare.cpp
-    core/test_simple_evaluator.cpp
+    core/test_sandbox.cpp
     core/test_template_scanner.cpp
     core/test_version.cpp)
 

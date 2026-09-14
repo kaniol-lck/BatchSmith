@@ -12,7 +12,7 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-#include "batchsmith/core/dsl/simple_evaluator.hpp"
+#include "batchsmith/core/dsl/engine.hpp"
 #include "batchsmith/core/version.hpp"
 #include "editor/ExpressionBar.h"
 #include "result/ResultPanel.h"
@@ -66,11 +66,11 @@ void MainWindow::buildCentralLayout() {
 
 void MainWindow::evaluateExpression(const QString& expression) {
     using batchsmith::core::ListSourceList;
-    using batchsmith::core::dsl::evaluate_simple;
-    using batchsmith::core::dsl::EvaluationResult;
+    using batchsmith::core::dsl::BatchResult;
+    using batchsmith::core::dsl::evaluate_template;
 
     const ListSourceList sources = m_listPanel->sources();
-    const EvaluationResult result = evaluate_simple(expression, sources);
+    const BatchResult result = evaluate_template(expression, sources);
 
     if (!result.ok()) {
         // 算不出来时清空输出，避免旧结果留在屏幕上被当成新结果
@@ -129,8 +129,8 @@ void MainWindow::showAbout() {
             QStringLiteral("关于 BatchSmith"),
             QStringLiteral("<b>BatchSmith</b> —— 把列表与表达式编译成批量操作"
                            "<br><br>%1"
-                           "<br><br>当前表达式求值只覆盖「区段里写列表名」这一子集"
-                           "（如 <code>$list1$</code>）；helper 与 Lua 表达式将在 Phase 2 接入。"
+                           "<br><br>表达式用 <code>$...$</code> 包裹，包裹内写 Lua；列表以"
+                           " <code>list1</code>、<code>list2</code>… 注入。"
                            "<br>GPL-3.0")
                     .arg(banner));
 }

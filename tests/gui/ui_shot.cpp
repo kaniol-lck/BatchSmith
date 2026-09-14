@@ -43,7 +43,8 @@ int capture_ui_shot(const QString& path) {
 
     // 顺手把「输入 → 确定 → 输出列表」跑一遍，这样截图里能同时看到三处状态
     if (auto* input = window.findChild<QLineEdit*>(QStringLiteral("expressionInput"))) {
-        input->setText(QStringLiteral("$list1$-第$list2$版"));
+        // 用行索引写法：模板读到 i ⇒ 逐行对应（0.3.0 起的推荐写法）
+        input->setText(QStringLiteral("$list1[i]$-第$list2$版"));
     }
     if (auto* confirm = window.findChild<QPushButton*>(QStringLiteral("confirmButton"))) {
         confirm->click();

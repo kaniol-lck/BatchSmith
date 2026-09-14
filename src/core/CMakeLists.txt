@@ -18,8 +18,11 @@ configure_file(
 
 add_library(batchsmith_core STATIC
     src/version.cpp
+    src/dsl/compiler.cpp
+    src/dsl/engine.cpp
     src/dsl/template_scanner.cpp
-    src/dsl/simple_evaluator.cpp
+    src/helper/helpers.cpp
+    src/sandbox/sandbox.cpp
     src/text/natural_compare.cpp)
 
 add_library(BatchSmith::Core ALIAS batchsmith_core)
