@@ -131,8 +131,21 @@ jobs:
           exit 1
 
       # 测试只链接 core，不需要图形环境
+      # 失败时要能看见**哪个用例、哪条断言**：ctest 不带 --output-on-failure 只会给一句
+      # "1 tests failed"，而 GitHub 的 job 日志匿名读不到（需要仓库写权限），
+      # 于是失败原因会完全不可见。这里把关键行提升为 ::error:: 注解 —— **注解是匿名可读的**。
       - name: 测试
-        run: ctest --preset ci
+        shell: bash
+        run: |
+          if ctest --preset ci --output-on-failure > /tmp/test.log 2>&1; then
+            grep -E 'Test #|tests passed|test cases:' /tmp/test.log || true
+          else
+            grep -E 'Test #[0-9]+|tests passed|FAILED|ERROR:|test cases:|assertions:' /tmp/test.log \
+              | tail -40 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+            exit 1
+          fi
 
       - name: 打包
         shell: bash

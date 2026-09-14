@@ -59,11 +59,15 @@ TEST_CASE("墙钟超时同样能拦住（指令数上限放宽时）") {
 }
 
 TEST_CASE("内存上限：构造大表被拦下") {
+    // 上限取 8MB 而不是 2MB：沙箱自身（Lua 状态 + env + 28 个 helper 闭包 + 四张库）
+    // 在有的编译器/运行库下基线就接近 2MB，那样**构造期**就会超限，报错信息里也就没有
+    // 「已中止」—— 用例会以"看不出原因"的方式失败（MSVC 上真踩过）。
+    // 下面的循环本身要分配几十 MB，所以 8MB 仍然稳稳触发。
     const auto result = evaluate_template(
             S(u"$(function() local t = {} for i = 1, 1000000 do t[i] = 'xxxxxxxxxxxxxxxx' end "
               "return #t end)()$"),
             {},
-            limits_with(10'000'000'000LL, 2LL * 1024 * 1024, 1LL * 1024 * 1024, 60'000));
+            limits_with(10'000'000'000LL, 8LL * 1024 * 1024, 1LL * 1024 * 1024, 60'000));
     CHECK_FALSE(result.ok());
     CHECK(result.error.contains(S(u"已中止")));
     CHECK(result.error.contains(S(u"内存")));
