@@ -242,11 +242,18 @@ using EscapeFn = QString (*)(const QString&);
     return shortcut_path;
 }
 
-[[nodiscard]] QString create_shell_script(const QString& shortcut_path,
-                                          const QString& program,
-                                          const QString& arguments,
-                                          const QString& name,
-                                          QString* error) {
+/// `.command` 用的启动脚本 —— 只有 macOS 分支会调用它。
+///
+/// 这个文件整体活在 `#if !defined(Q_OS_WIN)` 里面，而 `.command` 这一段在
+/// macOS 之外都是死代码：Linux 上 GCC 的 `-Wunused-function`（`-Wall` 自带、
+/// 且本项目对 GCC 开了 `-Werror`）会因此把**整个构建打断**。
+/// 标 `maybe_unused` 而不是加平台宏 —— 意图是"这个配置下确实用不到"，
+/// 而不是"这段代码不存在"；将来若 Linux 也要用，不必先去拆宏。
+[[maybe_unused]] [[nodiscard]] QString create_shell_script(const QString& shortcut_path,
+                                                           const QString& program,
+                                                           const QString& arguments,
+                                                           const QString& name,
+                                                           QString* error) {
     const QString text =
             QStringLiteral("#!/bin/sh\n"
                            "# BatchSmith 预设启动器 —— 双击即用「%2」这套配置打开 BatchSmith。\n"
