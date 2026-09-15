@@ -15,7 +15,7 @@ namespace batchsmith::core::helper {
 /// 少了这个出口，"文档漏写一个新的 helper" 就只能靠人肉 review 发现。
 [[nodiscard]] QStringList registered_names();
 
-/// 把 DSL 的 helper 集合注册进沙箱 env（技术方案 §3.5 的六类函数）。
+/// 把 DSL 的 helper 集合注册进沙箱 env（技术方案 §3.5 的六类，外加 0.4 起的「文件名」类）。
 ///
 /// 与原生写法并存且结果一致：`index(l,i)` ≡ `l[i]`、`count(l)` ≡ `#l`
 /// （构想书明确要求这一点，便于不熟 Lua 的用户迁移）。

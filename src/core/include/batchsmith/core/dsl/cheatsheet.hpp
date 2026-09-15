@@ -8,7 +8,7 @@ namespace batchsmith::core::dsl {
 
 /// 一个工具函数的文档条目。
 struct HelperDoc {
-    QString group;      ///< 分组名（列表 / 组合 / 生成 / 文本 / 路径 / 类型）
+    QString group;  ///< 分组名（列表 / 组合 / 生成 / 文本 / 路径 / 文件名 / 类型）
     QStringList names;  ///< 本条目覆盖的函数名（成对出现的如 upper/lower 是两个）
     QString signature;  ///< 展示用签名，形如 `slice(list, from[, to])`
     QString summary;    ///< 一句话说明
@@ -64,7 +64,8 @@ struct CheatSection {
 /// `helper_docs()` / `cheat_examples()` 生成 —— 所以 CHM 的目录、界面帮助窗口的目录、
 /// `bs cheatsheet` 的章节，三者永远一致，没有手工维护的中间产物。
 ///
-/// 两级结构：顶层是七个章节，二级是"工具函数"与"示例"里的分组。
+/// 两级结构：顶层是九个章节（个数与标题都在 `cheatsheet_sections()` 里，别在这里写死），
+/// 二级是"工具函数"与"示例"里的分组。
 /// 二级节点跳转到 HTML 里对应的分组标题（锚点由同一份数据生成，见 `cheatsheet_html()`）。
 [[nodiscard]] QString cheatsheet_hhc();
 

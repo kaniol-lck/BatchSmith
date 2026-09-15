@@ -117,6 +117,17 @@ export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
     -- 'mv "$list1[i]$" "第$fmt("%02d",i)$话 正片.mkv"'
 # 选项：filter=<glob>（多个用 ; 或 , 分隔） recursive=1  dirs=1（含子目录） hidden=1
 
+# 算出一份「计划」：这次批量操作会做些什么，一行一个"源 → 新名字"
+# 只读，不产生任何副作用（这是 Phase 4 真正执行之前必须过的一步）
+./build/windows-mingw/bin/bs.exe plan presets/example-rename.toml \
+    --bind input=D:/动画/某番
+# 绑定：先读预设旁边的 example-rename.local.toml（界面里绑过的路径就在那儿），
+#       再用 --bind 覆盖它
+# --json 输出机器可读的计划（状态名是稳定的 ASCII 词，给脚本用）
+./build/windows-mingw/bin/bs.exe plan 我的预设.toml --bind input=/data/某目录 --json
+# 退出码：0 全部可执行；1 有不可执行的行（计划里逐行写明了为什么）；
+#         2 用法错；3 计划没算出来（预设读不动、路径不通、模板不是逐行产名字…）
+
 # 语法与函数速查（与界面「帮助 → DSL 语法与函数速查」同一份内容）
 ./build/windows-mingw/bin/bs.exe cheatsheet
 
@@ -188,9 +199,11 @@ BatchSmith/
 ├── third_party/              vendored 依赖：Lua / sol2 / toml++ / doctest
 ├── src/
 │   ├── core/                 batchsmith_core 静态库 —— 只依赖 Qt6::Core
+│   │                         （list 列表来源 / dsl 扫描器·编译器 / sandbox 沙箱 /
+│   │                          helper 工具函数 / plan 计划与冲突检测 / preset 预设）
 │   ├── cli/                  bs
 │   └── gui/                  batchsmith_gui 静态库 + 瘦 main.cpp
-│       └── help|table|editor|result/  速查对话框 / 列表区 / 表达式条 / 输出区
+│       └── help|table|editor|result|preset/  速查 / 列表区 / 表达式条 / 输出区 / 预设
 ├── presets/                  示例预设
 └── tests/                    core 单测 + GUI 离屏测试
 ```
@@ -201,11 +214,14 @@ BatchSmith/
 
 执行是不可逆的那一半，所以：
 
-- **默认 dry-run**，没有显式确认不产生任何副作用；
+- **默认 dry-run**，没有显式确认不产生任何副作用。`bs plan` 这一步已经可用：它只读文件系统，
+  把"哪一行 → 哪个新名字"连同冲突一起摊出来；
 - 外部命令以 **argv 数组**传递（`QProcess::start`），**绝不经 shell 字符串拼接**；
-- 重命名前做冲突检测（两条输出同名 / 目标已存在 / 源不存在 / 批内互换走两阶段重命名）；
-- 文件行**绑定绝对路径而不是序号**，避免目录变动后命令打到别的文件上；
-- 每次执行写 JSONL 撤销日志，可逆序回放；
+- 重命名前做**冲突检测**：两条输出同名 / 目标已存在 / 目标跑出绑定文件夹 / 同一个文件被多行用到，
+  在计划里当场标出来；批内互换与"仅改大小写"也会被认出来（执行时走两阶段重命名）。
+  真正落盘的 `apply` 与撤销属 Phase 4；
+- 计划里的每一行**绑定绝对路径而不是序号**，避免目录变动后命令打到别的文件上；
+- 每次执行写 JSONL 撤销日志，可逆序回放（Phase 4）；
 - 预设里的 Lua 在沙箱中执行：`_ENV` 白名单 + 指令数钩子 + 内存上限 + 墙钟超时。
 
 ## 许可

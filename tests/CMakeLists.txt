@@ -15,6 +15,7 @@ add_executable(batchsmith_tests
     core/test_dir_source.cpp
     core/test_engine.cpp
     core/test_natural_compare.cpp
+    core/test_plan.cpp
     core/test_preset.cpp
     core/test_sandbox.cpp
     core/test_template_scanner.cpp

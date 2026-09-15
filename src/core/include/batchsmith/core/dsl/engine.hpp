@@ -12,7 +12,22 @@ struct BatchResult {
     QStringList rows;
     QString error;  ///< 非空即失败（编译错、运行时错、或沙箱中止）
 
+    /// 这一批的**输入行数**（`i` 的取值范围是 1…row_count，`rows` 模板变量的值）。
+    ///
+    /// 为什么单独给出来：`rows.size()` 是**输出**行数，两者在行展开下并不相等
+    /// （`$matrix(...)$` 会让一行变成多行）。需要"输出第 k 行对应哪个输入行"的调用方
+    /// （`bs plan` 要把行绑到文件上）必须能看见这个数，否则只能自己再算一遍行数规则 ——
+    /// 那就等于把「有 Ignore 取最短、否则取最长」这条规则复制成两份。
+    ///
+    /// 失败退出时保持 0。
+    qsizetype row_count = 0;
+
     [[nodiscard]] bool ok() const { return error.isEmpty(); }
+
+    /// 输出行与输入行**一一对应**吗？（`bs plan` 的 rename 计划要求这一点）
+    [[nodiscard]] bool rows_are_one_to_one() const {
+        return ok() && row_count > 0 && rows.size() == row_count;
+    }
 };
 
 /// 求值：**编译一次 → 逐行调用**（技术方案 §3.1），在沙箱中执行（ADR-6）。

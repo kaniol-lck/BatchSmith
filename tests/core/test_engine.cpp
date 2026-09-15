@@ -270,6 +270,67 @@ TEST_CASE("路径类 helper 同时接受 / 与 \\") {
     CHECK(rows_of(u"$join('a','b','c.txt')$", {}).first() == S(u"a/b/c.txt"));
 }
 
+TEST_CASE("文件名类 helper：set_ext 只换最后一个点之后的部分") {
+    CHECK(rows_of(u"$set_ext('a/b/c.txt', 'md')$", {}).first() == S(u"a/b/c.md"));
+    // 只动最后一个点：多段后缀（.tar.gz）按「最后一段是扩展名」处理
+    CHECK(rows_of(u"$set_ext('a.tar.gz', 'xz')$", {}).first() == S(u"a.tar.xz"));
+    // 本来没有扩展名就直接接上 —— 不会多出一个点
+    CHECK(rows_of(u"$set_ext('a/b/c', 'txt')$", {}).first() == S(u"a/b/c.txt"));
+
+    // 第二参数带不带点都认，空串 / 只有点 = 去掉扩展名
+    CHECK(rows_of(u"$set_ext('c.txt', '.md')$", {}).first() == S(u"c.md"));
+    CHECK(rows_of(u"$set_ext('a/b/c.txt', '')$", {}).first() == S(u"a/b/c"));
+    CHECK(rows_of(u"$set_ext('a/b/c.txt', '.')$", {}).first() == S(u"a/b/c"));
+
+    // 与 ext()/stem() 共用同一条判定：目录名里的点不算、点开头不算
+    CHECK(rows_of(u"$set_ext('a/b.c/d', 'x')$", {}).first() == S(u"a/b.c/d.x"));
+    CHECK(rows_of(u"$set_ext('.bashrc', 'x')$", {}).first() == S(u".bashrc.x"));
+}
+
+TEST_CASE("文件名类 helper：add_ext 追加到末尾，add_suffix 插在扩展名前") {
+    CHECK(rows_of(u"$add_ext('a.mkv', 'bak')$", {}).first() == S(u"a.mkv.bak"));
+    CHECK(rows_of(u"$add_ext('a', 'bak')$", {}).first() == S(u"a.bak"));
+    // 空串是「什么都不做」，而不是留下一个多余的点
+    CHECK(rows_of(u"$add_ext('a.mkv', '')$", {}).first() == S(u"a.mkv"));
+
+    CHECK(rows_of(u"$add_suffix('a/b.mkv', '_final')$", {}).first() == S(u"a/b_final.mkv"));
+    CHECK(rows_of(u"$add_suffix('a/b', '_final')$", {}).first() == S(u"a/b_final"));
+    CHECK(rows_of(u"$add_suffix('a/b.mkv', '')$", {}).first() == S(u"a/b.mkv"));
+    // 点开头同样按「不是扩展名」处理，与 set_ext 一致
+    CHECK(rows_of(u"$add_suffix('.bashrc', '_x')$", {}).first() == S(u".bashrc_x"));
+
+    // add_suffix 只碰文件名 —— 目录名里即使有同样的字面串也不动
+    CHECK(rows_of(u"$add_suffix('a_b/c.mkv', '_x')$", {}).first() == S(u"a_b/c_x.mkv"));
+}
+
+TEST_CASE("文件名类 helper：safe_name 让名字真的能落盘") {
+    // Windows 非法字符（<>:"/\|?*）与控制字符都换掉 —— 默认换成下划线
+    CHECK(rows_of(u"$safe_name('a:b?c*d')$", {}).first() == S(u"a_b_c_d"));
+    CHECK(rows_of(u"$safe_name('a\\tb')$", {}).first() == S(u"a_b"));
+    // 整串当作名字，不拆路径：斜杠也是非法字符
+    CHECK(rows_of(u"$safe_name('a/b')$", {}).first() == S(u"a_b"));
+
+    // 替换串可自定义；给空串表示直接删掉
+    CHECK(rows_of(u"$safe_name('a:b', '-')$", {}).first() == S(u"a-b"));
+    CHECK(rows_of(u"$safe_name('a:b', '')$", {}).first() == S(u"ab"));
+
+    // 结尾的点与空格：Windows 会静默截掉，所以提前去掉
+    CHECK(rows_of(u"$safe_name('a. ')$", {}).first() == S(u"a"));
+    CHECK(rows_of(u"$safe_name('a...')$", {}).first() == S(u"a"));
+
+    // 设备名不分大小写，给主干名补下划线；扩展名保留
+    CHECK(rows_of(u"$safe_name('con.mkv')$", {}).first() == S(u"con_.mkv"));
+    CHECK(rows_of(u"$safe_name('NUL')$", {}).first() == S(u"NUL_"));
+    CHECK(rows_of(u"$safe_name('console.mkv')$", {}).first() == S(u"console.mkv"));
+
+    // 干净的名字原样返回（不做任何多余的事）
+    CHECK(rows_of(u"$safe_name('片子 第01话.mkv')$", {}).first() == S(u"片子 第01话.mkv"));
+
+    // 全是非法字符与结尾点 → 空串，**不补默认名**：
+    // 交给计划阶段报 TargetEmpty，比悄悄生成一个 untitled 之类诚实
+    CHECK(rows_of(u"[$safe_name('.')$]", {}).first() == S(u"[]"));
+}
+
 TEST_CASE("类型类 helper") {
     CHECK(rows_of(u"$num('42')+1$", {}).first() == S(u"43"));
     CHECK(rows_of(u"$str(42)$", {}).first() == S(u"42"));

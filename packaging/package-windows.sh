@@ -12,17 +12,30 @@ BUILD_DIR="${1:?用法: VERSION=x.y.z $0 <build-dir> <out-dir>}"
 OUT_DIR="${2:?用法: VERSION=x.y.z $0 <build-dir> <out-dir>}"
 : "${VERSION:?必须设置 VERSION 环境变量，例如 VERSION=0.1.0}"
 
-# ⚠ 关键：windeployqt 与 7z 都是原生 Windows 程序，不认 Git Bash 的 POSIX 路径。
+if [[ ! -d "$BUILD_DIR" ]]; then
+    echo "构建目录不存在: $BUILD_DIR" >&2
+    exit 1
+fi
+mkdir -p "$OUT_DIR"
+
+# ⚠ 顺序要紧：**先转成绝对路径，再做 Windows 化**。
+#
+# cygpath -m 对相对入参是**原样返回**的（实测 `cygpath -m dist` → `dist`）。
+# 若 OUT_DIR 停在相对形态，后面那句 `cd "$OUT_DIR" && 7z … "$archive"` 里
+# "$archive" 也是相对的，于是它被再拼一次 cwd ⇒ 压缩包跑到 dist/dist/ 去，
+# 而脚本照样打印「已生成」，只有最后那句 du 以 cannot access 收场。
+# （实测踩到过，见 .workbuddy/memory 的同日记录。）
+make_absolute() { ( cd "$1" && pwd ); }
+BUILD_DIR="$(make_absolute "$BUILD_DIR")"
+OUT_DIR="$(make_absolute "$OUT_DIR")"
+
+# windeployqt 与 7z 都是原生 Windows 程序，不认 Git Bash 的 POSIX 路径。
 # 直接传 /tmp/dist/x.exe 会被 MSYS 拼成 \tmp\dist\x.exe（既非 POSIX 也非有效
 # Windows 路径），windeployqt 只会回一句 "does not exist"。
 # 用 cygpath -m 归一化成「Windows 盘符 + 正斜杠」，MSYS 工具与原生程序都能吃。
 if command -v cygpath >/dev/null 2>&1; then
     BUILD_DIR="$(cygpath -m "$BUILD_DIR")"
     OUT_DIR="$(cygpath -m "$OUT_DIR")"
-fi
-if [[ ! -d "$BUILD_DIR" ]]; then
-    echo "构建目录不存在: $BUILD_DIR" >&2
-    exit 1
 fi
 
 GUI_EXE="$BUILD_DIR/bin/batchsmith.exe"

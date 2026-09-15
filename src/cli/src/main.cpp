@@ -17,6 +17,8 @@
 #include "batchsmith/core/dsl/compiler.hpp"
 #include "batchsmith/core/dsl/engine.hpp"
 #include "batchsmith/core/list/list_source.hpp"
+#include "batchsmith/core/plan/plan.hpp"
+#include "batchsmith/core/preset/preset.hpp"
 #include "batchsmith/core/version.hpp"
 
 namespace {
@@ -38,6 +40,11 @@ constexpr int kExitOk = 0;
 constexpr int kExitEvalError = 1;
 constexpr int kExitUsage = 2;
 
+/// `bs plan` 的两条额外退出码。**分开是有意的**：脚本要能区分
+/// "计划算出来了但里面有不能执行的行（要给人看）"与"计划根本没算出来（要看报错）"。
+constexpr int kExitPlanProblems = 1;
+constexpr int kExitPlanFailed = 3;
+
 void print_plan() {
     QTextStream& out = out_stream();
     out << "\n"
@@ -51,13 +58,20 @@ void print_plan() {
         << "              recursive=1 递归子目录   dirs=1 把子目录也算条目\n"
         << "              hidden=1 含以 . 开头的条目\n"
         << "        条目按**自然序**排列（file2 在 file10 之前），值为相对该文件夹的路径。\n"
+        << "  bs plan <预设.toml> [--bind 槽位=路径]… [--json]\n"
+        << "        算出这次批量操作会做些什么并打印出来（哪一行 → 哪个新名字），\n"
+        << "        **只读、不产生任何副作用** —— 这是 Phase 4 的 apply 之前必须过的一步。\n"
+        << "        绑定：先读预设旁边的 <预设名>.local.toml（界面里绑过就在这里），\n"
+        << "              再用 --bind 覆盖它（命令行写的那个更明确）。\n"
+        << "        --json 输出机器可读的计划（脚本用；状态名是稳定的 ASCII 词）。\n"
+        << "        退出码：0 全部可执行；1 有不可执行的行（请看输出）；\n"
+        << "                2 用法错；3 计划没算出来（预设读不动、路径不通、模板对不上…）。\n"
         << "  bs cheatsheet [--html | --hhc]\n"
         << "        打印 DSL 语法、工具函数与示例（与界面的「帮助」同一份内容）；\n"
         << "        --html 输出可独立打开的 HTML 手册；\n"
         << "        --hhc  输出 CHM 的目录文件（配 packaging/make-chm.sh 打 .chm）。\n"
         << "\n"
         << "尚未实现（见 docs/技术方案与实现路线.md §7）：\n"
-        << "  bs plan  <预设> --bind k=v   生成 Plan 并打印 diff，不产生任何副作用（Phase 3）\n"
         << "  bs run   <预设> --bind k=v   执行；默认 dry-run，需 --apply 才真正落盘（Phase 4）\n"
         << "  bs undo  <日志>              按撤销日志逆序回放（Phase 4）\n";
 }
@@ -263,6 +277,83 @@ int run_eval(const QCommandLineParser& parser) {
     return kExitOk;
 }
 
+/// `--bind 槽位=路径` → 槽位绑定。可重复。
+bool parse_bind_options(const QCommandLineParser& parser,
+                        batchsmith::core::SlotBindings* bindings,
+                        QString* error) {
+    for (const QString& spec : parser.values(QStringLiteral("bind"))) {
+        const int separator = spec.indexOf(QLatin1Char('='));
+        if (separator <= 0) {
+            *error = QStringLiteral("--bind 的写法是 槽位名=路径，收到：%1").arg(spec);
+            return false;
+        }
+        const QString name = spec.left(separator).trimmed();
+        const QString path = spec.mid(separator + 1).trimmed();
+        if (name.isEmpty() || path.isEmpty()) {
+            *error = QStringLiteral("--bind 的槽位名与路径都不能为空，收到：%1").arg(spec);
+            return false;
+        }
+        bindings->insert(name, path);
+    }
+    return true;
+}
+
+int run_plan(const QCommandLineParser& parser) {
+    using batchsmith::core::load_bindings;
+    using batchsmith::core::load_preset;
+    using batchsmith::core::PresetLoad;
+    using batchsmith::core::SlotBindings;
+    using batchsmith::core::plan::build_plan;
+    using batchsmith::core::plan::plan_to_json;
+    using batchsmith::core::plan::plan_to_text;
+
+    const QStringList positional = parser.positionalArguments();
+    if (positional.size() < 2) {
+        err_stream() << "用法：bs plan <预设.toml> [--bind 槽位=路径]… [--json]\n";
+        return kExitUsage;
+    }
+    const QString preset_path = positional.at(1);
+
+    const PresetLoad loaded = load_preset(preset_path);
+    if (!loaded.ok()) {
+        err_stream() << loaded.error << "\n";
+        return kExitPlanFailed;
+    }
+
+    // 绑定：先读预设旁边那份 `.local.toml`（界面里绑过的话路径就在这里），
+    // 再用 `--bind` 覆盖它。覆盖方向是有意的 —— 命令行写的是这次**明确要求**的，
+    // 文件里那份是"上次留下的"。
+    QString bind_error;
+    SlotBindings bindings = load_bindings(preset_path, &bind_error);
+    if (!bind_error.isEmpty()) {
+        err_stream() << QStringLiteral("读不到绑定文件：%1\n").arg(bind_error);
+        return kExitPlanFailed;
+    }
+    QString parse_error;
+    if (!parse_bind_options(parser, &bindings, &parse_error)) {
+        err_stream() << parse_error << "\n";
+        return kExitUsage;
+    }
+
+    const auto built = build_plan(loaded.preset, bindings);
+    if (!built.ok()) {
+        err_stream() << built.error << "\n";
+        return kExitPlanFailed;
+    }
+
+    QTextStream& out = out_stream();
+    if (parser.isSet(QStringLiteral("json"))) {
+        out << plan_to_json(built.plan) << "\n";
+    } else {
+        out << plan_to_text(built.plan) << "\n";
+    }
+    out.flush();
+
+    // 有不可执行的行就返回非零 —— dry-run 要报告的正是这件事；
+    // 脚本据此决定"能不能往下走"，而不必去解析给人看的文本。
+    return built.plan.has_problems() ? kExitPlanProblems : kExitOk;
+}
+
 }  // namespace
 
 int main(int argc, char* argv[]) {
@@ -295,13 +386,21 @@ int main(int argc, char* argv[]) {
                                         QStringLiteral("名")));
     parser.addOption(QCommandLineOption(QStringLiteral("show-lua"),
                                         QStringLiteral("同时打印编译出的 Lua 源码。")));
+    parser.addOption(QCommandLineOption(QStringLiteral("bind"),
+                                        QStringLiteral("plan：把预设里的槽位绑到实际路径"
+                                                       "（如 --bind input=D:/动画）。可重复，"
+                                                       "覆盖伴生 .local.toml 里的绑定。"),
+                                        QStringLiteral("槽位=路径")));
+    parser.addOption(QCommandLineOption(QStringLiteral("json"),
+                                        QStringLiteral("plan：输出机器可读的 JSON"
+                                                       "（状态名是稳定的 ASCII 词）。")));
     parser.addOption(QCommandLineOption(QStringLiteral("html"),
                                         QStringLiteral("cheatsheet：输出 HTML 手册"
                                                        "（可用浏览器打开、便于分发）。")));
     parser.addOption(QCommandLineOption(
             QStringLiteral("hhc"), QStringLiteral("cheatsheet：输出 CHM 的目录文件（.hhc）。")));
     parser.addPositionalArgument(QStringLiteral("命令"),
-                                 QStringLiteral("eval；或省略以查看用法。"));
+                                 QStringLiteral("eval / plan；或省略以查看用法。"));
 
     parser.process(app);
 
@@ -320,6 +419,9 @@ int main(int argc, char* argv[]) {
     const QString command = positional.first();
     if (command == QStringLiteral("eval")) {
         return run_eval(parser);
+    }
+    if (command == QStringLiteral("plan")) {
+        return run_plan(parser);
     }
     if (command == QStringLiteral("cheatsheet") || command == QStringLiteral("help")) {
         // 与界面「帮助 → DSL 语法与函数速查」渲染的是**同一份数据**

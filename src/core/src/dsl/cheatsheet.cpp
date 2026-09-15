@@ -49,7 +49,8 @@ const QList<CheatSection>& sections() {
 }  // namespace
 
 QList<HelperDoc> helper_docs() {
-    // 顺序与 helper::registered_names() 一致（列表 → 组合 → 生成 → 文本 → 路径 → 类型）
+    // 顺序与 helper::registered_names() 一致
+    // （列表 → 组合 → 生成 → 文本 → 路径 → 文件名 → 类型）
     return {
             // ---- 列表 ----
             {QStringLiteral("列表"),
@@ -156,6 +157,24 @@ QList<HelperDoc> helper_docs() {
              {QStringLiteral("join")},
              QStringLiteral("join(part...)"),
              QStringLiteral("按 / 拼接路径，自动处理重复斜杠")},
+
+            // ---- 文件名 ----
+            {QStringLiteral("文件名"),
+             {QStringLiteral("set_ext")},
+             QStringLiteral("set_ext(p, e)"),
+             QStringLiteral("换扩展名（替换）；e 可带点，给空串等于去掉扩展名")},
+            {QStringLiteral("文件名"),
+             {QStringLiteral("add_ext")},
+             QStringLiteral("add_ext(p, e)"),
+             QStringLiteral("在末尾追加一层扩展名：a.mkv → a.mkv.bak")},
+            {QStringLiteral("文件名"),
+             {QStringLiteral("add_suffix")},
+             QStringLiteral("add_suffix(p, s)"),
+             QStringLiteral("插在扩展名之前：a.mkv → a_final.mkv（加标记用这个）")},
+            {QStringLiteral("文件名"),
+             {QStringLiteral("safe_name")},
+             QStringLiteral("safe_name(s[, repl])"),
+             QStringLiteral("变成能落盘的文件名：换非法字符、去结尾点与空格、躲开设备名")},
 
             // ---- 类型 ----
             {QStringLiteral("类型"),
@@ -392,6 +411,58 @@ QList<CheatExample> cheat_examples() {
              none,
              none,
              {}},
+
+            {kGroupHelper,
+             QStringLiteral("换扩展名：只动最后一个点之后的部分，目录不动"),
+             QStringLiteral(R"dsl($set_ext("D:/in/IMG_0001.jpeg", "jpg")$)dsl"),
+             none,
+             none,
+             {QStringLiteral("D:/in/IMG_0001.jpg")}},
+
+            {kGroupHelper,
+             QStringLiteral("本来没有扩展名就直接接上，不会多出一个点"),
+             QStringLiteral(R"dsl($set_ext("片子 第01话", "mkv")$)dsl"),
+             none,
+             none,
+             {QStringLiteral("片子 第01话.mkv")}},
+
+            {kGroupHelper,
+             QStringLiteral("第二参数给空串等于去掉扩展名"),
+             QStringLiteral(R"dsl($set_ext("out/片子 第01话.mkv", "")$)dsl"),
+             none,
+             none,
+             {QStringLiteral("out/片子 第01话")}},
+
+            {kGroupHelper,
+             QStringLiteral("追加一层扩展名：备份那种「加在最后」的用法"),
+             QStringLiteral(R"dsl($add_ext("片子 第01话.mkv", "bak")$)dsl"),
+             none,
+             none,
+             {QStringLiteral("片子 第01话.mkv.bak")}},
+
+            {kGroupHelper,
+             QStringLiteral("在扩展名之前插一段：给一整批加同一个标记"),
+             QStringLiteral(R"dsl($add_suffix(list1[i], "_终稿")$)dsl"),
+             l1,
+             none,
+             {QStringLiteral("报告A_终稿"),
+              QStringLiteral("报告B_终稿"),
+              QStringLiteral("报告C_终稿")}},
+
+            {kGroupHelper,
+             QStringLiteral("文件名安全化：换掉冒号这类非法字符（Linux 上能建、Windows 上不能）"),
+             QStringLiteral(R"dsl($safe_name("第1话 序章: 起点")$)dsl"),
+             none,
+             none,
+             {QStringLiteral("第1话 序章_ 起点")}},
+
+            {kGroupHelper,
+             QStringLiteral(
+                     "安全化会去掉结尾的点与空格、给设备名补下划线 —— 这三件事不做都会静默出错"),
+             QStringLiteral(R"dsl([$safe_name("a. ")$] [$safe_name("con.mkv")$])dsl"),
+             none,
+             none,
+             {QStringLiteral("[a] [con_.mkv]")}},
 
             // ------------------------------------------------------------------
             // Lua 原生

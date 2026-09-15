@@ -84,8 +84,8 @@ TEST_CASE("速查表：文档里的函数名与实际注册的一一对应") {
                   unknown.join(QStringLiteral("、")).toStdString());
 
     // 数量对不上时也要显式失败：这提醒改代码的人「文档也要一起看」
-    CHECK(registered.size() == 29);
-    CHECK(documented_set.size() == 29);
+    CHECK(registered.size() == 33);
+    CHECK(documented_set.size() == 33);
 }
 
 TEST_CASE("速查表：每条函数文档的字段都是完整的") {
@@ -195,7 +195,7 @@ TEST_CASE("速查表：CHM 目录（.hhc）与 HTML 的锚点一一对应") {
         ++group_count;
         CHECK(hhc.contains(QStringLiteral("index.html#") + id));
     }
-    CHECK(group_count == 12);  // 6 组工具函数 + 6 组示例
+    CHECK(group_count == 13);  // 7 组工具函数 + 6 组示例
 
     // 目录项总数 = 章节数 + 分组数。写成推导而不是硬编码：
     // 加一节时不必改这里，而这个式子仍然能抓住"漏了目录项"。

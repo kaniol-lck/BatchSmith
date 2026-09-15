@@ -274,6 +274,7 @@ BatchResult evaluate_template(const QString& template_text,
         }
     }
 
+    result.row_count = total_rows;
     result.rows = rows;
     return result;
 }

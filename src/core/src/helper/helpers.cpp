@@ -513,6 +513,51 @@ QString normalized(const QString& path) {
     return result;
 }
 
+/// 一个路径拆成「主干」与「扩展名」两部分。
+///
+/// ⚠️ **「什么算扩展名」这条判定只允许在这里写一次**。`ext` / `stem` / `set_ext` /
+/// `add_ext` / `add_suffix` 全部依赖它 —— 以前 `ext` 与 `stem` 各自抄了一遍
+/// `lastIndexOf` 的算法，那种重复在加第三个函数时必然分叉。
+struct NameParts {
+    QString stem;          ///< 去过扩展名的部分（**含目录**）
+    QString ext;           ///< 扩展名，不含点
+    bool has_ext = false;  ///< `a.` 算「有扩展名，但扩展名为空」，与 `a` 不同
+};
+
+/// 判定规则（三条，都写死在这里）：
+///
+/// 1. 扩展名取**最后一个**点之后的部分；
+/// 2. 那个点必须在**最后一个 `/` 之后、且不是文件名的首字符** ——
+///    所以 `.bashrc` 没有扩展名（点开头是隐藏文件，不是后缀）；
+/// 3. 点前面必须至少有一个字符 ——`a/b.c/d` 里的点是**目录名**的一部分，不算。
+[[nodiscard]] NameParts split_name(const QString& path) {
+    const qsizetype slash = path.lastIndexOf(QLatin1Char('/'));
+    const qsizetype dot = path.lastIndexOf(QLatin1Char('.'));
+    if (dot > slash + 1) {
+        return NameParts{path.left(dot), path.mid(dot + 1), true};
+    }
+    return NameParts{path, QString(), false};
+}
+
+/// 把「扩展名」参数归一化：容忍前导点（`".mkv"` 与 `"mkv"` 同义），
+/// 全是点或空串则视作「没有扩展名」。
+[[nodiscard]] QString clean_ext(const QString& ext) {
+    QString result = ext;
+    while (result.startsWith(QLatin1Char('.'))) {
+        result.remove(0, 1);
+    }
+    return result;
+}
+
+/// 压值 + 单次字符串上限检查。这四个文件名 helper 的结果都可能比输入长
+/// （`add_ext` 追加、`safe_name` 的替换串可能多字符），所以要挡一道。
+void push_checked(lua_State* state, const QString& text, const char* function) {
+    if (text.size() > max_string_bytes(state)) {
+        luaL_error(state, "%s: 结果超过单次字符串上限", function);
+    }
+    push_string(state, text);
+}
+
 int helper_basename(lua_State* state) {
     const QString path = normalized(require_string(state, 1, "basename"));
     const qsizetype slash = path.lastIndexOf(QLatin1Char('/'));
@@ -529,21 +574,13 @@ int helper_dirname(lua_State* state) {
 
 int helper_ext(lua_State* state) {
     const QString path = normalized(require_string(state, 1, "ext"));
-    const qsizetype dot = path.lastIndexOf(QLatin1Char('.'));
-    const qsizetype slash = path.lastIndexOf(QLatin1Char('/'));
-    push_string(state, dot > slash + 1 ? path.mid(dot + 1) : QString());  // 不含点
+    push_string(state, split_name(path).ext);  // 不含点；没有扩展名则空串
     return 1;
 }
 
 int helper_stem(lua_State* state) {
     const QString path = normalized(require_string(state, 1, "stem"));
-    const qsizetype slash = path.lastIndexOf(QLatin1Char('/'));
-    const qsizetype dot = path.lastIndexOf(QLatin1Char('.'));
-    if (dot > slash + 1) {
-        push_string(state, path.left(dot));
-    } else {
-        push_string(state, path);
-    }
+    push_string(state, split_name(path).stem);
     return 1;
 }
 
@@ -568,6 +605,135 @@ int helper_join(lua_State* state) {
         result += part;
     }
     push_string(state, result);
+    return 1;
+}
+
+// ---------------------------------------------------------------------------
+// 文件名类 —— 直接改名字的那几个（扩展名的增删换、文件名安全化）
+//
+// 与「路径类」的分工：路径类只**拆**（basename / dirname / ext / stem / join），
+// 这里负责**改**。批量改名时真正高频的正是这几个动作，而用现有的拆解函数拼一遍
+// 很容易写错（漏掉「本来就没有扩展名」的分支就多出一个点）。
+// ---------------------------------------------------------------------------
+
+/// 换扩展名（替换，不是追加。追加用 `add_ext`）。
+///
+/// 保留目录部分，只动最后一个点之后的东西。三条边界：
+/// - 本来没有扩展名 → 直接接上（`a` + `mkv` → `a.mkv`），**不会**变成 `a..mkv`；
+/// - `e` 给空串（或只有点）→ 去掉扩展名（`a/b/c.txt` → `a/b/c`）；
+/// - `e` 的前导点可有可无，`".mkv"` 与 `"mkv"` 结果相同。
+int helper_set_ext(lua_State* state) {
+    const QString path = normalized(require_string(state, 1, "set_ext"));
+    const QString ext = clean_ext(require_string(state, 2, "set_ext"));
+
+    const NameParts parts = split_name(path);
+    push_checked(
+            state, ext.isEmpty() ? parts.stem : parts.stem + QLatin1Char('.') + ext, "set_ext");
+    return 1;
+}
+
+/// 在**末尾**追加一段当作扩展名（不动原来的扩展名）。
+///
+/// `a.mkv` + `bak` → `a.mkv.bak`。备份/二次加工那种「加一层后缀」的场合用它。
+/// `e` 为空则原样返回。
+int helper_add_ext(lua_State* state) {
+    const QString path = normalized(require_string(state, 1, "add_ext"));
+    const QString ext = clean_ext(require_string(state, 2, "add_ext"));
+
+    push_checked(state, ext.isEmpty() ? path : path + QLatin1Char('.') + ext, "add_ext");
+    return 1;
+}
+
+/// 在扩展名**之前**插入一段文本（目录与扩展名都不动）。
+///
+/// `a.mkv` + `_final` → `a_final.mkv`；没有扩展名时接在末尾（`a` → `a_final`）。
+///
+/// 这是「给一整批文件加同一个标记」最常用的动作。用 `replace` 做不到：
+/// `replace(p, "a", "b")` 会把**目录名里的** a 也换掉。
+int helper_add_suffix(lua_State* state) {
+    const QString path = normalized(require_string(state, 1, "add_suffix"));
+    const QString suffix = require_string(state, 2, "add_suffix");
+
+    if (suffix.isEmpty()) {
+        push_checked(state, path, "add_suffix");
+        return 1;
+    }
+
+    const NameParts parts = split_name(path);
+    if (!parts.has_ext) {
+        push_checked(state, path + suffix, "add_suffix");
+        return 1;
+    }
+    push_checked(state, parts.stem + suffix + QLatin1Char('.') + parts.ext, "add_suffix");
+    return 1;
+}
+
+/// 设备名：Windows 上这些名字（不分大小写）**永远不能**作为文件主干名，
+/// 哪怕带扩展名也不行（`con.mkv` 一样建不出来）。
+[[nodiscard]] bool is_reserved_device_name(const QString& base) {
+    static const QStringList kReserved = {
+            QStringLiteral("CON"),  QStringLiteral("PRN"),  QStringLiteral("AUX"),
+            QStringLiteral("NUL"),  QStringLiteral("COM1"), QStringLiteral("COM2"),
+            QStringLiteral("COM3"), QStringLiteral("COM4"), QStringLiteral("COM5"),
+            QStringLiteral("COM6"), QStringLiteral("COM7"), QStringLiteral("COM8"),
+            QStringLiteral("COM9"), QStringLiteral("LPT1"), QStringLiteral("LPT2"),
+            QStringLiteral("LPT3"), QStringLiteral("LPT4"), QStringLiteral("LPT5"),
+            QStringLiteral("LPT6"), QStringLiteral("LPT7"), QStringLiteral("LPT8"),
+            QStringLiteral("LPT9"),
+    };
+    return kReserved.contains(base.toUpper());
+}
+
+/// 把一段文本变成**能真正落盘**的文件名。
+///
+/// 做三件事，都是「不做的话会静默出错」的那一类：
+///
+/// 1. **换掉非法字符**：Windows 不允许 `< > : " / \ | ? *` 与控制字符（0x00–0x1F），
+///    默认换成 `_`（`repl` 可改）。番剧标题里的 `第1话 序章: 起点` 直接当文件名
+///    在 Windows 上会被建造成别的东西 —— 而 Linux 上却能成功，于是同一个预设
+///    在两台机器上行为不同。
+/// 2. **去掉结尾的点和空格**：Windows 会**静默截断**它们（`a.` 建成 `a`、`"a "` 建成 `a`）。
+///    截断之后名字与计划里写的不一样，而用户看到的"成功"是真的 —— 这是最难查的一类。
+/// 3. **躲开设备名**：`con` / `nul` / `com1`… 在主干名后补 `_`（`con.mkv` → `con_.mkv`）。
+///
+/// ⚠️ **整串当作一个名字，不做路径拆分**。给了含 `/` 的路径，那些斜杠也会被当成
+/// 非法字符换掉（`D:/x/a.mkv` → `D__x_a.mkv`）。要保留目录就自己拼：
+/// `join(dirname(p), safe_name(basename(p)))`。
+/// 这样定是刻意的：它的输入是"标题/字段"这类**名字**，猜路径会把
+/// `第1话/第2话` 这种本当整串处理的输入拆错，而拆错是静默的。
+///
+/// 结果为空串是可能的（输入全是非法字符与结尾点），此时**不补默认名** ——
+/// 交给计划阶段报 `TargetEmpty`，比悄悄生成 `untitled` 之类诚实。
+int helper_safe_name(lua_State* state) {
+    const QString text = require_string(state, 1, "safe_name");
+    const QString replacement =
+            lua_gettop(state) >= 2 ? require_string(state, 2, "safe_name") : QStringLiteral("_");
+
+    static const QString kIllegal = QStringLiteral("<>:\"/\\|?*");
+
+    QString sanitized;
+    sanitized.reserve(text.size());
+    for (const QChar ch : text) {
+        if (ch.unicode() < 0x20 || kIllegal.contains(ch)) {
+            sanitized += replacement;
+        } else {
+            sanitized += ch;
+        }
+    }
+
+    // 结尾的点与空格 Windows 会截掉 —— 提前去掉，让计划里写的就是最终的名字
+    while (!sanitized.isEmpty() &&
+           (sanitized.endsWith(QLatin1Char('.')) || sanitized.endsWith(QLatin1Char(' ')))) {
+        sanitized.chop(1);
+    }
+
+    const NameParts parts = split_name(sanitized);
+    if (is_reserved_device_name(parts.stem)) {
+        const QString base = parts.stem + QLatin1Char('_');
+        sanitized = parts.has_ext ? base + QLatin1Char('.') + parts.ext : base;
+    }
+
+    push_checked(state, sanitized, "safe_name");
     return 1;
 }
 
@@ -713,6 +879,11 @@ constexpr Helpers kHelpers[] = {
         {"ext", helper_ext},
         {"stem", helper_stem},
         {"join", helper_join},
+        // 文件名
+        {"set_ext", helper_set_ext},
+        {"add_ext", helper_add_ext},
+        {"add_suffix", helper_add_suffix},
+        {"safe_name", helper_safe_name},
         // 类型
         {"num", helper_num},
         {"str", helper_str},

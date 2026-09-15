@@ -3,6 +3,7 @@
 #include <cstdio>
 
 #include <QApplication>
+#include <QComboBox>
 #include <QDir>
 #include <QFile>
 #include <QLabel>
@@ -18,6 +19,7 @@
 #include <QWidget>
 
 #include "MainWindow.h"
+#include "batchsmith/core/dsl/cheatsheet.hpp"
 #include "batchsmith/core/preset/preset.hpp"
 #include "help/CheatsheetDialog.h"
 #include "preset/PresetManagerDialog.h"
@@ -163,6 +165,40 @@ int capture_help_shot(const QString& path) {
     dialog.resize(820, 640);
     dialog.show();
     QApplication::processEvents();
+
+    // 自证输出：与主窗口那张同理 —— 截图是在无图形环境里生成的，生成者看不到图，
+    // 看图的人又未必知道"本该有什么"。
+    //
+    // 这里尤其需要：帮助窗口的内容全部来自 core 的速查表数据，**新加一个 helper
+    // 分组时最容易漏掉的就是这张图**（分组排在正文里，一屏之外，肉眼比对不出来）。
+    // 把章节数与函数分组打出来，才能确认图上该有的东西真的在。
+    QStringList groups;
+    qsizetype function_count = 0;
+    for (const auto& doc : batchsmith::core::dsl::helper_docs()) {
+        if (!groups.contains(doc.group)) {
+            groups.append(doc.group);
+        }
+        function_count += doc.names.size();
+    }
+
+    QStringList chapters;
+    if (const auto* toc = dialog.findChild<QComboBox*>(QStringLiteral("cheatsheetToc"))) {
+        for (int row = 0; row < toc->count(); ++row) {
+            chapters.append(toc->itemText(row));
+        }
+    }
+
+    const QString report = QStringLiteral("[shot] %1\n"
+                                          "        章节 %2 项：%3\n"
+                                          "        工具函数 %4 个，分 %5 组：%6\n")
+                                   .arg(QDir::toNativeSeparators(path))
+                                   .arg(chapters.size())
+                                   .arg(chapters.join(QStringLiteral(" / ")))
+                                   .arg(function_count)
+                                   .arg(groups.size())
+                                   .arg(groups.join(QStringLiteral(" ")));
+    std::fprintf(stderr, "%s", qUtf8Printable(report));
+
     return dialog.grab().save(path) ? 0 : 1;
 }
 
