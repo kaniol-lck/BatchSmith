@@ -194,6 +194,22 @@ int env_index_metamethod(lua_State* state) {
     return 1;
 }
 
+/// 把 `self` 写进 `state` 的 extraspace。
+///
+/// 用 `memcpy` 而不是 `*static_cast<Sandbox**>(...) = self`：extraspace 是
+/// `char[sizeof(void*)]`，**它的对齐只保证到 1** —— 类型双关写入等于假设了目标
+/// 8 字节对齐，那是未定义行为（换个编译器或优化档就可能被编成要求对齐的指令）。
+/// 读侧同理（见 `load_self`）。memcpy 的这点开销编译器会直接优化掉。
+void store_self(lua_State* state, Sandbox* self) {
+    std::memcpy(lua_getextraspace(state), &self, sizeof(self));
+}
+
+[[nodiscard]] Sandbox* load_self(lua_State* state) {
+    Sandbox* self = nullptr;
+    std::memcpy(&self, lua_getextraspace(state), sizeof(self));
+    return self;
+}
+
 }  // namespace
 
 Sandbox::Sandbox(Limits limits) : m_limits(limits) {
@@ -202,12 +218,22 @@ Sandbox::Sandbox(Limits limits) : m_limits(limits) {
         raise(Violation::Memory, QStringLiteral("无法创建 Lua 状态"));
         return;
     }
-    // 分配器需要 lua_State 才能拿到账本，所以创建后再重设一次 ud
+
+    // ⚠️ 顺序是硬要求：**先写 extraspace，再让分配器拿到账本**。
+    //
+    // 分配器要靠 extraspace 里的 `Sandbox*` 才找得到账本，而它一被挂上
+    // （`lua_setallocf` 把 ud 设成 m_state）就会走那条路径。两行若调换，中间
+    // 任何一次分配都会用到 `lua_newstate` 留下的**未初始化 extraspace** ——
+    // 那是个随机指针，`sandbox->account()` 就会往野内存里记账。
+    //
+    // 这个窗口当前是"空的"（中间只有不分配的 `lua_atpanic`），但"靠中间没有分配
+    // 来保证安全"太脆：加一行日志、换个 Lua 版本都可能打破它。顺序固定下来之后，
+    // 无论中间发生什么都只读到正确指针。
+    store_self(m_state, this);
+
     lua_setallocf(m_state, tracked_allocator, m_state);
     lua_atpanic(m_state, panic_handler);
 
-    // extraspace 只写这一个指针（大小恰好是 sizeof(void*)）
-    *static_cast<Sandbox**>(lua_getextraspace(m_state)) = this;
     m_account.started = Clock::now();
     lua_sethook(m_state, limit_hook, LUA_MASKCOUNT, m_limits.instruction_slice);
     build_environment();
@@ -216,13 +242,13 @@ Sandbox::Sandbox(Limits limits) : m_limits(limits) {
 Sandbox::~Sandbox() {
     if (m_state != nullptr) {
         // 先清掉 extraspace，避免关闭过程中的分配触发我们的记账/报错
-        *static_cast<Sandbox**>(lua_getextraspace(m_state)) = nullptr;
+        store_self(m_state, nullptr);
         lua_close(m_state);
     }
 }
 
 Sandbox* Sandbox::from_state(lua_State* state) {
-    return *static_cast<Sandbox**>(lua_getextraspace(state));
+    return load_self(state);
 }
 
 qsizetype Sandbox::elapsed_ms() const {
