@@ -117,6 +117,14 @@
 - 截图夹具新增 `BATCHSMITH_PRESET_SHOT`：把「管理预设」对话框渲染成 PNG
   （会临时往预设目录写几份演示预设，含一份**故意写坏的** —— 不然"坏文件也要列出来并标红"
   在图上不成立），生成时同样往 stderr 打一行自证。
+- **Windows 内存诊断通道**（CI 的 `windows-heapcheck` 作业，不影响发布）：
+  Windows 的单元测试自引入 Lua 沙箱起一直以 `Exit code 0xc0000374`
+  （`STATUS_HEAP_CORRUPTION`）收场，而 Linux / macOS / 本机 MinGW 全绿 —— 说明有一处
+  内存越界，只在 MSVC 的堆布局下暴露。Release 用的是发布版 CRT（分配里没有守卫字节），
+  越界写会悄悄发生，直到某块内存被释放才由 OS 发现，那时崩溃点已经是**被害者**。
+  这个作业用 Debug 构建（调试堆有守卫字节）跑测试，并在**每个用例之后**校验一次堆
+  （`tests/main.cpp` 的 `HeapCheckListener`），把"第一个让堆变得不一致的用例"直接指出来；
+  再逐个用例单独进程跑一遍作为兜底。新增 `ci-debug` 预设（Debug，只编 core 测试）。
 ## [0.3.0] — 2026-09-15
 
 **Phase 2 完成：DSL 编译器 + Lua 沙箱 + helper 集合。** 产品的核心（表达式求值）真正跑起来了。

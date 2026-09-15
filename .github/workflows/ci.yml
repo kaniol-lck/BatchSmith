@@ -241,6 +241,114 @@ jobs:
           fi
 
   # =========================================================================
+  # Windows 内存诊断：Debug 构建 + CRT 调试堆
+  #
+  # 为什么单独一个 job：Windows 的单元测试从引入 Lua 沙箱那一轮起就以
+  # `Exit code 0xc0000374`（STATUS_HEAP_CORRUPTION，堆损坏）收场，而 Linux、macOS
+  # 与本机 MinGW 全绿 —— 说明有一处内存越界，只在 MSVC 的堆布局下才暴露。
+  #
+  # Release 构建用的是发布版 CRT，分配里没有守卫字节：越界写会悄悄发生，直到某块
+  # 内存被释放才由 OS 发现（就是那个 0xc0000374），而那时崩溃点已经是**被害者**。
+  # Debug 构建用调试堆，每块分配前后都有守卫字节，"第一个让堆变得不一致的用例"
+  # 会被直接指出来（见 tests/main.cpp 的 HeapCheckListener）。
+  #
+  # 这个 job 不影响发布：只编 core 测试，不打包、不上传产物。
+  # =========================================================================
+  windows-heapcheck:
+    name: Windows 内存诊断
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装 Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2019_64
+          cache: true
+
+      - name: 安装 Ninja
+        shell: bash
+        run: |
+          python -m pip install --quiet ninja
+          echo "$(python -c 'import ninja; print(ninja.BIN_DIR)')" >> "$GITHUB_PATH"
+
+      - name: 准备 MSVC 环境
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 配置（Debug，不含界面）
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: ${{ env.QT_ROOT_DIR }}
+        run: cmake --preset ci-debug
+
+      - name: 构建 core 测试
+        shell: bash
+        run: |
+          if cmake --build --preset ci-debug --target batchsmith_tests --parallel \
+               > /tmp/build.log 2>&1; then
+            tail -2 /tmp/build.log
+          else
+            grep -nE 'error [A-Z]+[0-9]+:|error:|fatal error' /tmp/build.log | head -10 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
+
+      - name: 跑测试（每个用例之后校验堆）
+        shell: bash
+        run: |
+          exe=./build/ci-debug/bin/batchsmith_tests.exe
+
+          echo "=== 1) 整跑一遍：报告"第一个让堆不一致的用例" ==="
+          set +e
+          "$exe" -s -nv > /tmp/all.log 2>&1
+          code=$?
+          set -e
+
+          # 这是本 job 的核心产出：越界写的**发生点**（而不是崩溃点）
+          if grep -aq '\[heap\]' /tmp/all.log; then
+            grep -a '\[heap\]' /tmp/all.log | head -5 | while IFS= read -r line; do
+              echo "::error::$line"
+            done
+          else
+            echo "整跑未报堆不一致（退出码 $code）—— 继续逐个用例排查"
+          fi
+
+          grep -aE 'test cases:|assertions:|Status:' /tmp/all.log | tail -3 | tr -d '\r'
+
+          echo "=== 2) 逐个用例单独跑一个进程：崩了的用例就是元凶 ==="
+          # 单独进程跑的价值：整跑时"崩在 Y"只能说明 Y 是受害者；
+          # 一个用例单独跑还崩，那个用例自己就是元凶。
+          set +e
+          # doctest 的 --list-test-cases 是"两行表头 + 用例名 + 两行表尾"，且输出是 CRLF：
+          # 直接用行号切会踩到 \r，按前缀过滤更稳。
+          "$exe" --list-test-cases | tr -d '\r' \
+            | grep -v '^\[doctest\]' | grep -vE '^={10,}$' > /tmp/cases.txt
+          total=$(wc -l < /tmp/cases.txt)
+          echo "共 $total 个用例"
+          bad=0
+          while IFS= read -r name; do
+            "$exe" -tc="$name" -nv > /tmp/one.log 2>&1
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              bad=$((bad + 1))
+              if [ "$bad" -le 8 ]; then
+                echo "::error::单独跑「$name」异常退出，退出码 $rc"
+                grep -a '\[heap\]' /tmp/one.log | head -1 | while IFS= read -r line; do
+                  echo "::error::  $line"
+                done
+              else
+                echo "单独跑「$name」异常退出，退出码 $rc（已超过注解上限，见日志）"
+              fi
+            fi
+          done < /tmp/cases.txt
+          set -e
+          echo "逐个跑完成：$total 个用例里有 $bad 个异常退出"
+          exit 0
+
+  # =========================================================================
   # 代码格式
   # =========================================================================
   format:

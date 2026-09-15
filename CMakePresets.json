@@ -53,6 +53,17 @@
         "CMAKE_BUILD_TYPE": "Release",
         "BATCHSMITH_STRICT": "ON"
       }
+    },
+    {
+      "name": "ci-debug",
+      "displayName": "CI 内存诊断（Debug + CRT 调试堆，只编 core 测试）",
+      "description": "Windows 专用：Debug 构建的 CRT 会给每块分配加守卫字节，越界会被当场指出。含界面会白白多编几分钟，所以关掉 GUI",
+      "inherits": "base",
+      "generator": "Ninja",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "BATCHSMITH_BUILD_GUI": "OFF"
+      }
     }
   ],
   "buildPresets": [
@@ -71,6 +82,10 @@
     {
       "name": "ci",
       "configurePreset": "ci"
+    },
+    {
+      "name": "ci-debug",
+      "configurePreset": "ci-debug"
     }
   ],
   "testPresets": [
