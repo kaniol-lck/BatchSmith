@@ -53,6 +53,23 @@ add_library(batchsmith::lua ALIAS lua54)
 list(LENGTH _lua_all_sources _lua_count)
 message(STATUS "  Lua 编译单元    : ${_lua_count} 个源文件（已排除 lua.c / luac.c / onelua.c / ltests.c）")
 
+# ---------------------------------------------------------------------------
+# 打开 Lua 自己的 API 检查（LUA_USE_APICHECK）
+#
+# 打开了它，C API 的**栈索引越界会当场断言失败并指出 `lapi.c` 的行号** —— 否则
+# 那是静默的未定义行为：Release 下 `index2addr` 不做检查，越界读栈会拿到垃圾，
+# 表现为"某个平台上莫名其妙的堆损坏"（我们就遇上过：Windows/MSVC 上 core 测试
+# 以 `Exit code 0xc0000374`（STATUS_HEAP_CORRUPTION）收场，而 Linux/macOS/本机
+# MinGW 全绿 —— 典型的内存错误被不同堆布局掩盖）。
+#
+# 为什么不只在调试构建里开：
+#   * 代价只是每次 API 调用多几次索引比较，相对 DSL 求值（毫秒级）可以忽略；
+#   * 而它防的是"进程级崩溃 + 无从定位"，天平明显偏向开着。
+# `-UNDEBUG` 是必需的：`lua_assert` 最终就是标准 `assert`，Release 的 `-DNDEBUG`
+# 会把它整个关掉，于是这个开关形同虚设。
+target_compile_definitions(lua54 PRIVATE LUA_USE_APICHECK)
+target_compile_options(lua54 PRIVATE -UNDEBUG)
+
 target_include_directories(lua54 SYSTEM PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/lua")
 
 set_target_properties(lua54 PROPERTIES

@@ -441,8 +441,7 @@ TEST_CASE("预设：仓库里的示例预设能真的打开（用户第一个会
     // 而这份文件在仓库里不该存在（是本机信息）。断言的只是"能打开、结构对"。
     MainWindow window;
     QString error;
-    REQUIRE(window.openPreset(QStringLiteral(BATCHSMITH_SOURCE_DIR
-                                             "/presets/example-rename.toml"),
+    REQUIRE(window.openPreset(QStringLiteral(BATCHSMITH_SOURCE_DIR "/presets/example-rename.toml"),
                               &error));
     CHECK(error.isEmpty());
 

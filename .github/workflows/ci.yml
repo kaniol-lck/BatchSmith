@@ -153,7 +153,9 @@ jobs:
             # **崩溃前的最后一条就是元凶**。测试可执行文件已关掉输出缓冲（见 tests/main.cpp），
             # 所以崩溃前的内容不会随进程一起丢。
             echo "::error::测试异常退出 —— 带 --success 重跑以定位崩溃点"
-            ./build/ci/bin/batchsmith_tests -s -nv > /tmp/unit.log 2>&1 || true
+            # 加超时：无缓冲 + --success 的输出量很大，这一步明显比正常路径慢；
+            # 万一卡住，宁可放弃用例名（ctest 那边的信息还在），也不能把 job 拖死。
+            timeout 300 ./build/ci/bin/batchsmith_tests -s -nv > /tmp/unit.log 2>&1 || true
             grep -a '^TEST CASE:' /tmp/unit.log | tail -3 | while IFS= read -r line; do
               echo "::error::崩溃前最后跑到的用例：$line"
             done

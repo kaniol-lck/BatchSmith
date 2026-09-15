@@ -13,8 +13,26 @@
 
 #include <cstdio>
 
+#if defined(_MSC_VER)
+#include <crtdbg.h>
+#include <cstdlib>
+#endif
+
 int main(int argc, char** argv) {
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::setvbuf(stderr, nullptr, _IONBF, 0);
+
+#if defined(_MSC_VER)
+    // MSVC 的 assert 失败默认会弹一个对话框 —— 在 CI 上没人点它，job 就卡死在那儿了。
+    // 改成只往 stderr 写，然后照常 abort。
+    //
+    // 这条为什么需要：我们给 Lua 开了 LUA_USE_APICHECK（见 third_party/CMakeLists.txt），
+    // 它的断言正是用标准 assert 实现的；一旦 C API 的栈索引越界，我们希望**看到
+    // 那一行断言**（文件与行号就是根因），而不是让 CI 挂住。
+    _CrtSetReportMode(_CRT_ASSERT, _CRTDBG_MODE_FILE);
+    _CrtSetReportFile(_CRT_ASSERT, _CRTDBG_FILE_STDERR);
+    _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
+#endif
+
     return doctest::Context(argc, argv).run();
 }
