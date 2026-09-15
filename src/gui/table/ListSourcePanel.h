@@ -32,6 +32,12 @@ public:
 
     [[nodiscard]] int columnCount() const { return static_cast<int>(m_columns.size()); }
 
+    /// 清空并按给定规格重建所有列（加载预设时用）。
+    ///
+    /// 列名取规格里的 `name`，**不走 `nextName()`** —— 预设里叫 `list1` 的那一列，
+    /// 加载后必须还叫 `list1`，否则表达式里的 `$list1[i]$` 会指向别处。
+    void setSources(const batchsmith::core::ListSourceList& sources);
+
 public slots:
     /// 新增一列（名字由 nextName() 分配）
     void addColumn();

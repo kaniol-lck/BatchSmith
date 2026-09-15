@@ -16,6 +16,8 @@ ExpressionBar::ExpressionBar(QWidget* parent) : QWidget(parent) {
     connect(m_input, &QLineEdit::returnPressed, this, &ExpressionBar::emitSubmitted);
     connect(m_input, &QLineEdit::textChanged, this, [this](const QString& text) {
         m_confirmButton->setEnabled(!text.isEmpty());
+        // 编辑文字就等于改了预设内容 —— 主窗口据此把标题标上"未保存"
+        emit textEdited();
     });
 
     m_confirmButton = new QPushButton(QStringLiteral("确定"), this);
@@ -45,6 +47,12 @@ ExpressionBar::ExpressionBar(QWidget* parent) : QWidget(parent) {
 
 QString ExpressionBar::expression() const {
     return m_input->text().trimmed();
+}
+
+void ExpressionBar::setExpression(const QString& expression) {
+    // setText 会触发 textChanged（于是按钮可用状态与"未保存"标记都跟着更新），
+    // 但不会触发 returnPressed，所以这里不会意外求值一次。
+    m_input->setText(expression);
 }
 
 void ExpressionBar::showError(const QString& message) {

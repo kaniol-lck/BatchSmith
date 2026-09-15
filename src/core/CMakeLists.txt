@@ -26,6 +26,7 @@ add_library(batchsmith_core STATIC
     src/helper/helpers.cpp
     src/list/dir_source.cpp
     src/list/list_source.cpp
+    src/preset/preset.cpp
     src/sandbox/sandbox.cpp
     src/text/natural_compare.cpp)
 

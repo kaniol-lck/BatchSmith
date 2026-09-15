@@ -1,5 +1,7 @@
 #include "table/ListSourcePanel.h"
 
+#include <utility>
+
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QScrollArea>
@@ -95,4 +97,30 @@ batchsmith::core::ListSourceList ListSourcePanel::sources() const {
         sources.append(column->source());
     }
     return sources;
+}
+
+void ListSourcePanel::setSources(const batchsmith::core::ListSourceList& sources) {
+    for (ListSourceColumn* column : std::as_const(m_columns)) {
+        m_columnLayout->removeWidget(column);
+        // 先摘掉父子关系再 deleteLater()。
+        //
+        // 删除是**延后**的（在列自己的槽里立刻 delete 不安全），不摘的话那些
+        // "等着被删的旧列"仍挂在对象树上 —— 紧接着按名字找 `list1` 会先找到旧列，
+        // 于是刚装好的内容看起来像没生效。（测试当场抓到了这一条。）
+        column->setParent(nullptr);
+        column->deleteLater();
+    }
+    m_columns.clear();
+
+    for (const batchsmith::core::ListSource& source : sources) {
+        auto* column = new ListSourceColumn(source.name, this);
+        connect(column, &ListSourceColumn::removeRequested, this, &ListSourcePanel::removeColumn);
+        connect(column, &ListSourceColumn::changed, this, &ListSourcePanel::sourcesChanged);
+
+        m_columnLayout->insertWidget(m_columnLayout->count() - 1, column);
+        m_columns.append(column);
+        column->applySpec(source);
+    }
+
+    emit sourcesChanged();
 }

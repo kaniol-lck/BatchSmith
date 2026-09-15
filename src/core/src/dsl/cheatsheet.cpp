@@ -27,6 +27,7 @@ const QList<CheatSection>& sections() {
             {QStringLiteral("sec-pitfalls"), QStringLiteral("七、容易踩的几个点")},
             {QStringLiteral("sec-examples"),
              QStringLiteral("八、示例（下面每一条都会被自动测试跑一遍）")},
+            {QStringLiteral("sec-preset"), QStringLiteral("九、把当前配置存成预设")},
     };
     return kList;
 }
@@ -572,6 +573,53 @@ QString cheatsheet_text() {
 
     lines.append(QStringLiteral("    列表区的值就是上面示例里的 list1 = 报告A、报告B、报告C，"));
     lines.append(QStringLiteral("    list2 = 1、2、3。"));
+    lines.append(QString());
+
+    // ---- 预设 ----
+    lines.append(section_title(u"sec-preset"));
+    lines.append(QString());
+    lines.append(QStringLiteral("    · 预设 = 当前的列表 + 表达式，存成一个 .toml 文件。"));
+    lines.append(QStringLiteral("      界面：文件 → 打开预设(Ctrl+O) / 保存(Ctrl+S) / 另存为 /"));
+    lines.append(QStringLiteral("      管理预设。启动时也能直接带上它："));
+    lines.append(QStringLiteral("          batchsmith 我的预设.toml"));
+    lines.append(QString());
+    lines.append(QStringLiteral("    · 预设里不存绝对路径：绑定的文件夹写成槽位 ${input}，"));
+    lines.append(QStringLiteral("      本机实际路径存在旁边的 <预设名>.local.toml 里。"));
+    lines.append(
+            QStringLiteral("      于是预设文件可以进版本控制、可以发给别人 —— 分享时别带那个"));
+    lines.append(QStringLiteral("      .local.toml。"));
+    lines.append(QString());
+    lines.append(
+            QStringLiteral("    · 槽位还没绑定时，加载后会明确说出来；把文件夹拖到那一列上就"));
+    lines.append(QStringLiteral("      会自动绑好，保存时记住。"));
+    lines.append(QString());
+    lines.append(
+            QStringLiteral("    · 文件长这样（界面另存为写出的就是这个形状，可以直接手改）："));
+    lines.append(QString());
+    lines.append(QStringLiteral("        [preset]"));
+    lines.append(QStringLiteral("        name = '番剧重命名'"));
+    lines.append(QStringLiteral("        version = 1"));
+    lines.append(QString());
+    lines.append(QStringLiteral("        [[lists]]"));
+    lines.append(QStringLiteral("        id = 'list1'"));
+    lines.append(QStringLiteral("        source = { kind = 'dir', path = '${input}', "
+                                "filter = '*.mkv' }"));
+    lines.append(QStringLiteral("        fill = 'empty'"));
+    lines.append(QString());
+    lines.append(QStringLiteral("        [[lists]]"));
+    lines.append(QStringLiteral("        id = 'list2'"));
+    lines.append(QStringLiteral("        items = ['第01话', '第02话']    # 不写 source 就是手输"));
+    lines.append(QStringLiteral("        fill = 'empty'"));
+    lines.append(QString());
+    lines.append(QStringLiteral("        [output]"));
+    lines.append(QStringLiteral("        mode = 'rename'"));
+    lines.append(QStringLiteral("        template = '$stem(list1[i])$ $list2[i]$.mkv'"));
+    lines.append(QString());
+    lines.append(QStringLiteral("    · fill 决定长度不齐时怎么办：empty 留空 / ignore 取最短 /"));
+    lines.append(QStringLiteral("      repeat 从头重复。"));
+    lines.append(
+            QStringLiteral("    · 还没实现的来源（expr / snapshot / seq / rand…）写进 kind 会"));
+    lines.append(QStringLiteral("      明确报错，不会静默忽略。"));
 
     return lines.join(QLatin1Char('\n'));
 }

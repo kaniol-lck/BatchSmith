@@ -128,7 +128,17 @@ export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
 
 ```bash
 ./build/windows-mingw/bin/batchsmith.exe
+
+# 启动时直接载入一个预设（位置参数与 --preset 等价）
+./build/windows-mingw/bin/batchsmith.exe presets/example-rename.toml
 ```
+
+预设就是"当前的列表 + 表达式"，在「文件」菜单里可以新建 / 打开（`Ctrl+O`）/
+保存（`Ctrl+S`）/ 另存为 / 管理预设。
+
+**预设里不存绝对路径**：绑定的文件夹写成槽位 `${input}`，本机实际路径存在旁边的
+`<预设名>.local.toml` 里 —— 于是预设文件可以进版本控制、可以发给别人
+（分享时别带那个 `.local.toml`）。
 
 所有可执行文件都统一输出到 `<构建目录>/bin/`，与生成器无关（见顶层 `CMakeLists.txt` 的说明）。
 

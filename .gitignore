@@ -82,6 +82,7 @@ Desktop.ini
 .workbuddy/patches/
 .workbuddy/chm/
 .workbuddy/*.py
+.workbuddy/*.txt
 .workbuddy/chm/
 .workbuddy/*.py
 # 本地工具脚本（如 Windows 下的窗口截图），跨平台可复现的做法见 docs/界面说明.md

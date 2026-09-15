@@ -15,6 +15,7 @@ add_executable(batchsmith_tests
     core/test_dir_source.cpp
     core/test_engine.cpp
     core/test_natural_compare.cpp
+    core/test_preset.cpp
     core/test_sandbox.cpp
     core/test_template_scanner.cpp
     core/test_version.cpp)
@@ -25,6 +26,11 @@ target_link_libraries(batchsmith_tests
         batchsmith::doctest)
 
 target_link_libraries(batchsmith_tests PRIVATE batchsmith_warnings)
+
+# 有个用例要读仓库里那份示例预设（presets/example-rename.toml）——
+# 示例文件会随时间腐坏，得有个东西盯着它。
+target_compile_definitions(batchsmith_tests PRIVATE
+    BATCHSMITH_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
 add_test(NAME batchsmith.unit
          COMMAND $<TARGET_FILE:batchsmith_tests>)
@@ -44,6 +50,7 @@ if(BATCHSMITH_BUILD_GUI)
         gui/test_cheatsheet_dialog.cpp
         gui/test_list_source_column.cpp
         gui/test_main_window.cpp
+        gui/test_preset_ui.cpp
         gui/ui_shot.cpp
         gui/ui_shot.hpp)
 
@@ -60,6 +67,10 @@ if(BATCHSMITH_BUILD_GUI)
             "${CMAKE_SOURCE_DIR}/src/gui")
 
     target_link_libraries(batchsmith_gui_tests PRIVATE batchsmith_warnings)
+
+    # 有个用例要打开仓库里那份示例预设 —— 那是用户第一个会试的东西
+    target_compile_definitions(batchsmith_gui_tests PRIVATE
+        BATCHSMITH_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
 
     add_test(NAME batchsmith.gui
              COMMAND $<TARGET_FILE:batchsmith_gui_tests>)

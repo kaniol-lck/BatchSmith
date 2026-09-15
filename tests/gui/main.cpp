@@ -3,6 +3,8 @@
 #include <doctest/doctest.h>
 
 #include <QApplication>
+#include <QStandardPaths>
+#include <QString>
 
 #include "ui_shot.hpp"
 
@@ -12,6 +14,15 @@
 /// 也不会真的弹窗口出来。
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+
+    // ---- 测试隔离：别碰开发机上真实的设置与预设目录 ----
+    //
+    // 预设相关的用例会往"用户预设目录"里写文件、也会读写"最近打开"。
+    // 用独立的组织/应用名 + Qt 的测试模式，让这些落到测试专用的位置；
+    // 否则跑一次测试就会污染开发者的实际配置（"最近打开"里冒出一堆临时文件）。
+    QApplication::setOrganizationName(QStringLiteral("BatchSmithTest"));
+    QApplication::setApplicationName(QStringLiteral("BatchSmithTest"));
+    QStandardPaths::setTestModeEnabled(true);
 
     // 只服务于「渲染一张版面截图给人看」，与测试断言无关。
     // 用环境变量而不是命令行参数，是为了不干扰 doctest 自己的参数解析。

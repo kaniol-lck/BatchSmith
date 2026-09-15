@@ -291,6 +291,29 @@ void ListSourceColumn::setKind(ListSourceKind kind) {
     m_kindCombo->setCurrentIndex(index);
 }
 
+void ListSourceColumn::applySpec(const batchsmith::core::ListSource& source) {
+    const bool is_directory = source.kind == ListSourceKind::Directory;
+
+    // 先把规格填进控件，再切模式 —— 切模式那一步就会按规格取数
+    if (is_directory) {
+        m_pathEdit->setText(source.dir.path.isEmpty() ? QString()
+                                                      : QDir::toNativeSeparators(source.dir.path));
+        m_filterEdit->setText(source.dir.filter);
+        m_recursiveCheck->setChecked(source.dir.recursive);
+        m_dirsCheck->setChecked(source.dir.include_dirs);
+    }
+
+    m_kindCombo->setCurrentIndex(is_directory ? kDirectoryIndex : kManualIndex);
+
+    if (is_directory) {
+        // 重新读一次：预设里存的是"从哪取"而不是"取到了什么"，
+        // 照抄预设里的 items 会让人看到上次打开时的旧内容
+        refreshDirectory();
+    } else {
+        m_model->setStringList(source.items);
+    }
+}
+
 void ListSourceColumn::bindDirectory(const QString& path) {
     if (path.trimmed().isEmpty()) {
         return;

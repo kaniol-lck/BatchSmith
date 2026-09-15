@@ -209,6 +209,44 @@ struct GroupAnchor {
             "</ol>");
 }
 
+/// 章节 9：预设
+[[nodiscard]] QString render_preset() {
+    return QStringLiteral(
+            "<p><b>预设</b> = 当前的列表 + 表达式，存成一个 <code>.toml</code> 文件。"
+            "界面在「文件」菜单里（打开 <code>Ctrl+O</code> / 保存 <code>Ctrl+S</code> / "
+            "另存为 / 管理预设），启动时也能直接带上它："
+            "<code>batchsmith 我的预设.toml</code>。</p>"
+            "<h3>为什么不存绝对路径</h3>"
+            "<p>绑定的文件夹在预设里写成<b>槽位</b> <code>${input}</code>，本机实际路径存在"
+            "旁边的 <code>&lt;预设名&gt;.local.toml</code> 里。于是预设文件可以进版本控制、"
+            "可以发给别人 —— 分享时别带那个 <code>.local.toml</code>。槽位还没绑定时，"
+            "加载后会明确说出来；把文件夹拖到那一列上就会自动绑好，保存时记住。</p>"
+            "<h3>文件长什么样</h3>"
+            "<p>界面「另存为」写出的就是这个形状，可以直接手改：</p>"
+            "<pre>[preset]\n"
+            "name = '番剧重命名'\n"
+            "version = 1\n\n"
+            "[[lists]]\n"
+            "id = 'list1'\n"
+            "source = { kind = 'dir', path = '${input}', filter = '*.mkv' }\n"
+            "fill = 'empty'\n\n"
+            "[[lists]]\n"
+            "id = 'list2'\n"
+            "items = ['第01话', '第02话']    # 不写 source 就是手输\n"
+            "fill = 'empty'\n\n"
+            "[output]\n"
+            "mode = 'rename'\n"
+            "template = '$stem(list1[i])$ $list2[i]$.mkv'</pre>"
+            "<ul>"
+            "<li><code>source</code> 只管「从哪取数」：<code>kind = 'dir'</code> 绑定文件夹，"
+            "不写 <code>source</code> 就是手输（<code>items</code> 就是内容）。</li>"
+            "<li><code>fill</code> 管「长度不齐时怎么办」：<code>empty</code> 留空 / "
+            "<code>ignore</code> 取最短 / <code>repeat</code> 从头重复。</li>"
+            "<li>还没实现的来源（<code>expr</code> / <code>snapshot</code> / <code>seq</code> / "
+            "<code>rand</code>…）写进 <code>kind</code> 会<b>明确报错</b>，不会静默忽略。</li>"
+            "</ul>");
+}
+
 /// 章节 7：示例（每条都带实际输出）
 [[nodiscard]] QString render_examples() {
     const QList<GroupAnchor> anchors =
@@ -281,6 +319,7 @@ QString cheatsheet_html() {
             {"sec-lua", &render_lua},
             {"sec-pitfalls", &render_pitfalls},
             {"sec-examples", &render_examples},
+            {"sec-preset", &render_preset},
     };
 
     for (const CheatSection& section : cheatsheet_sections()) {

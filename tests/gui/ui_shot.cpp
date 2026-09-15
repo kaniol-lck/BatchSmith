@@ -98,6 +98,10 @@ void report_state(MainWindow& window, const QString& path) {
                          static_cast<long long>(model->stringList().size()));
         }
     }
+    std::fprintf(stderr,
+                 "        预设 = %s%s\n",
+                 qUtf8Printable(window.presetName()),
+                 window.presetPath().isEmpty() ? "（还没保存过）" : "（已保存）");
 }
 
 }  // namespace
@@ -128,6 +132,18 @@ int capture_ui_shot(const QString& path) {
     }
     if (auto* confirm = window.findChild<QPushButton*>(QStringLiteral("confirmButton"))) {
         confirm->click();
+    }
+
+    // 存一次预设（写进那个临时目录，跟着一起消失）：
+    // 于是截图里的标题显示的是预设名而不是「未命名*」，也顺带走过一遍保存路径 ——
+    // 文件夹路径在这一步被槽位化成 ${input}，本机绑定落在旁边的 .local.toml。
+    if (demo.isValid()) {
+        QString save_error;
+        const bool saved = window.savePresetTo(
+                QDir(demo.path()).filePath(QStringLiteral("番剧重命名.toml")), &save_error);
+        if (!saved) {
+            std::fprintf(stderr, "[shot] 预设没存成：%s\n", qUtf8Printable(save_error));
+        }
     }
 
     window.show();
