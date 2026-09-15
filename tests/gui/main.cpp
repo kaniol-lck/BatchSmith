@@ -2,6 +2,8 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdio>
+
 #include <QApplication>
 #include <QStandardPaths>
 #include <QString>
@@ -14,6 +16,11 @@
 /// 也不会真的弹窗口出来。
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+
+    // 关掉输出缓冲：测试若以崩溃收场，缓冲区里没落盘的内容会连进程一起消失，
+    // 而"崩溃前最后跑到的用例名"往往是唯一的定位线索（见 tests/main.cpp 的说明）。
+    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    std::setvbuf(stderr, nullptr, _IONBF, 0);
 
     // ---- 测试隔离：别碰开发机上真实的设置与预设目录 ----
     //

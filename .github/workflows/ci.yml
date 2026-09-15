@@ -140,10 +140,26 @@ jobs:
           if ctest --preset ci --output-on-failure > /tmp/test.log 2>&1; then
             grep -E 'Test #|tests passed|test cases:' /tmp/test.log || true
           else
-            grep -E 'Test #[0-9]+|tests passed|FAILED|ERROR:|test cases:|assertions:' /tmp/test.log \
-              | tail -40 | while IFS= read -r line; do
-              echo "::error::$line"
+            # 注：GitHub 对每个 step 的注解有数量上限（10 条左右），所以摘要压成**一条**
+            # （用 %0A 在消息里换行），免得它把后面"崩溃前跑到的用例"挤掉。
+            grep -E 'Test #[0-9]+|tests passed|FAILED|ERROR:|test cases:|assertions:|Exit code' /tmp/test.log \
+              | tail -20 | tr -d '\r' | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}' > /tmp/summary.txt
+            echo "::error::测试失败摘要：$(cat /tmp/summary.txt)"
+
+            # ---- 崩溃（不是断言失败）时，上面那几行说明不了问题 ----
+            # ctest 对崩溃只给一句 "Exit code 0xc0000374***Exception"（0xc0000374 是
+            # STATUS_HEAP_CORRUPTION），既没有失败的断言，也没有"跑到哪儿了"。
+            # 这时带 --success 重跑一次：每个用例名都会打出来，
+            # **崩溃前的最后一条就是元凶**。测试可执行文件已关掉输出缓冲（见 tests/main.cpp），
+            # 所以崩溃前的内容不会随进程一起丢。
+            echo "::error::测试异常退出 —— 带 --success 重跑以定位崩溃点"
+            ./build/ci/bin/batchsmith_tests -s -nv > /tmp/unit.log 2>&1 || true
+            grep -a '^TEST CASE:' /tmp/unit.log | tail -3 | while IFS= read -r line; do
+              echo "::error::崩溃前最后跑到的用例：$line"
             done
+            tail -12 /tmp/unit.log | tr -d '\r' | sed -e 's/%/%25/g' \
+              | awk '{printf "%s%%0A", $0}' > /tmp/tail.txt
+            echo "::error::测试输出尾部：$(cat /tmp/tail.txt)"
             exit 1
           fi
 
