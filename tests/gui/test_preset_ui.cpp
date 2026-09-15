@@ -513,6 +513,21 @@ TEST_CASE("预设：菜单里直接列出最近用过的，当前那个带勾") 
     REQUIRE(window.openPreset(first, nullptr));
     CHECK(recent_actions().size() == 2);
 
+    // ---- 走真正的入口：点菜单项 ----
+    // 这条路径必须单独测：点它会触发"重建菜单"，而 QMenu::clear() 会 delete
+    // 正在发射 triggered 的那个 action。直接调 openPreset() 是测不到的。
+    // 此刻顺序是 [最近, 另一套]，点第二项就是切到「另一套」
+    REQUIRE(recent_actions().at(0)->isChecked());
+    REQUIRE(recent_actions().at(1)->text() == S(u"另一套.toml"));
+    recent_actions().at(1)->trigger();
+    QCoreApplication::processEvents();  // 打开被推到了事件循环下一轮
+
+    CHECK(window.presetPath() == second);
+    CHECK(recent_actions().size() == 2);  // 切过去不该多出一条
+    CHECK(recent_actions().at(0)->text() == S(u"另一套.toml"));
+    CHECK(recent_actions().at(0)->isChecked());
+    CHECK_FALSE(recent_actions().at(1)->isChecked());
+
     // 文件被外部删掉后不该还留在菜单里 —— 留着点了必然失败，比空着更烦
     REQUIRE(QFile::remove(second));
     REQUIRE(window.openPreset(first, nullptr));  // 打开会重建菜单

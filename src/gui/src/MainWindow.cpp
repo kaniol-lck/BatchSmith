@@ -17,6 +17,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QStringList>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -598,7 +599,13 @@ void MainWindow::rebuildPresetMenu() {
             action->setData(path);
             action->setStatusTip(QDir::toNativeSeparators(path));
             action->setToolTip(QDir::toNativeSeparators(path));
-            connect(action, &QAction::triggered, this, [this, path] { openPresetFromUi(path); });
+            // 打开预设会让 rememberRecent() 重建这个菜单，而 QMenu::clear() **会 delete
+            // 归它所有的 action** —— 此刻我们正在这个 action 自己发射的 triggered 上，
+            // 等于把自己的信号处理链拆掉。Qt 对"槽里删掉发送者"有兜底，但没必要赌它：
+            // 推到事件循环下一轮再做，动作与菜单都已稳定。
+            connect(action, &QAction::triggered, this, [this, path] {
+                QTimer::singleShot(0, this, [this, path] { openPresetFromUi(path); });
+            });
         }
     }
 
