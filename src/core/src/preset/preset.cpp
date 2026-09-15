@@ -599,6 +599,76 @@ QStringList list_preset_files() {
     return files;
 }
 
+namespace {
+
+/// 把用户给的名字净化成"能当文件名用"的形式。
+///
+/// 不做这一步的话，一个叫 `番剧/第2季` 的预设会尝试往子目录里写文件（失败），
+/// 一个叫 `a:b` 的在 Windows 上直接失败 —— 而这类失败发生在"保存"这个动作里，
+/// 用户看到的只是"存不上"。
+[[nodiscard]] QString sanitize_file_base(QString name) {
+    static const QString kIllegal = QStringLiteral("<>:\"/\\|?*");
+
+    name = name.trimmed();
+    for (QChar& ch : name) {
+        // 控制字符在文件名里是未定义行为（Windows 直接拒绝）
+        if (ch.unicode() < 0x20 || kIllegal.contains(ch)) {
+            ch = QLatin1Char('_');
+        }
+    }
+
+    // Windows 上文件名不能以点或空格结尾（会静默被去掉，于是"存了但名字不对"）
+    while (!name.isEmpty() &&
+           (name.endsWith(QLatin1Char('.')) || name.endsWith(QLatin1Char(' ')))) {
+        name.chop(1);
+    }
+
+    // `.local` 是绑定文件的后缀，用它当预设名会导致下次读不出来
+    while (name.endsWith(QLatin1String(".local"), Qt::CaseInsensitive)) {
+        name.chop(6);
+        while (!name.isEmpty() &&
+               (name.endsWith(QLatin1Char('.')) || name.endsWith(QLatin1Char(' ')))) {
+            name.chop(1);
+        }
+    }
+
+    return name;
+}
+
+}  // namespace
+
+QString unique_file_path(const QString& directory,
+                         const QString& base_name,
+                         const QString& suffix,
+                         const QString& fallback) {
+    QString base = sanitize_file_base(base_name);
+    if (base.isEmpty()) {
+        base = sanitize_file_base(fallback);
+    }
+    if (base.isEmpty()) {
+        base = QStringLiteral("未命名");
+    }
+
+    const QDir dir(directory);
+    const auto path_for = [&dir, &suffix](const QString& stem) {
+        return dir.filePath(stem + suffix);
+    };
+
+    if (!QFileInfo::exists(path_for(base))) {
+        return path_for(base);
+    }
+    // 从 2 开始试：`名字 2.toml` 比 `名字 (2).toml` 更像人手打的，也不含容易
+    // 被各种工具转义的括号。999 之后放弃计数、直接盖在最后一个上 ——
+    // 真到那一步说明用户在批量生成，给个能用的路径比报错好。
+    for (int index = 2; index <= 999; ++index) {
+        const QString candidate = QStringLiteral("%1 %2").arg(base).arg(index);
+        if (!QFileInfo::exists(path_for(candidate))) {
+            return path_for(candidate);
+        }
+    }
+    return path_for(QStringLiteral("%1 999").arg(base));
+}
+
 bool save_preset(const Preset& preset, const QString& path, QString* error) {
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {

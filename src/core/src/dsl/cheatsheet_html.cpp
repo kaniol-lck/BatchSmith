@@ -212,10 +212,18 @@ struct GroupAnchor {
 /// 章节 9：预设
 [[nodiscard]] QString render_preset() {
     return QStringLiteral(
-            "<p><b>预设</b> = 当前的列表 + 表达式，存成一个 <code>.toml</code> 文件。"
-            "界面在「文件」菜单里（打开 <code>Ctrl+O</code> / 保存 <code>Ctrl+S</code> / "
-            "另存为 / 管理预设），启动时也能直接带上它："
-            "<code>batchsmith 我的预设.toml</code>。</p>"
+            "<p><b>预设</b> = 当前的列表 + 表达式，存成一个 <code>.toml</code> 文件。</p>"
+            "<h3>怎么用</h3>"
+            "<ul>"
+            "<li><b>存</b>：「文件 → 保存预设」（<code>Ctrl+S</code>）<b>不用先挑路径</b> —— "
+            "没存过的直接落进预设目录（重名自动加序号）；要挑地方用「另存为」。</li>"
+            "<li><b>取</b>：「预设」菜单里直接列着最近用过的，点一下就切过去（当前那个带勾）；"
+            "也可以用「文件 → 打开预设」（<code>Ctrl+O</code>）。</li>"
+            "<li><b>双击即用</b>：在「预设 → 管理预设」里选中它，点「创建快捷方式」，"
+            "桌面就会出现一个带着 <code>--preset</code> 参数的快捷方式。</li>"
+            "<li>启动时直接带上预设也可以：<code>batchsmith 我的预设.toml</code> 或 "
+            "<code>batchsmith --preset \"我的预设.toml\"</code>。</li>"
+            "</ul>"
             "<h3>为什么不存绝对路径</h3>"
             "<p>绑定的文件夹在预设里写成<b>槽位</b> <code>${input}</code>，本机实际路径存在"
             "旁边的 <code>&lt;预设名&gt;.local.toml</code> 里。于是预设文件可以进版本控制、"

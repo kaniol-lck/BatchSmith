@@ -18,6 +18,7 @@
 #include <QVBoxLayout>
 
 #include "batchsmith/core/preset/preset.hpp"
+#include "preset/PresetShortcut.h"
 
 namespace {
 
@@ -65,6 +66,14 @@ PresetManagerDialog::PresetManagerDialog(QWidget* parent) : QDialog(parent) {
     m_removeButton->setObjectName(QStringLiteral("presetRemoveButton"));
     connect(m_removeButton, &QPushButton::clicked, this, &PresetManagerDialog::removeSelected);
 
+    m_shortcutButton = new QPushButton(QStringLiteral("创建快捷方式"), this);
+    m_shortcutButton->setObjectName(QStringLiteral("presetShortcutButton"));
+    m_shortcutButton->setStatusTip(
+            QStringLiteral("在桌面建一个快捷方式，双击它就用这个预设打开 BatchSmith"));
+    m_shortcutButton->setToolTip(
+            QStringLiteral("在桌面建一个快捷方式，双击它就用这个预设打开 BatchSmith"));
+    connect(m_shortcutButton, &QPushButton::clicked, this, &PresetManagerDialog::createShortcut);
+
     auto* revealButton = new QPushButton(QStringLiteral("打开预设文件夹"), this);
     revealButton->setObjectName(QStringLiteral("presetRevealButton"));
     connect(revealButton, &QPushButton::clicked, this, &PresetManagerDialog::revealDirectory);
@@ -77,6 +86,7 @@ PresetManagerDialog::PresetManagerDialog(QWidget* parent) : QDialog(parent) {
     buttonLayout->setContentsMargins(0, 0, 0, 0);
     buttonLayout->addWidget(m_openButton);
     buttonLayout->addWidget(m_renameButton);
+    buttonLayout->addWidget(m_shortcutButton);
     buttonLayout->addWidget(m_removeButton);
     buttonLayout->addStretch();
     buttonLayout->addWidget(revealButton);
@@ -104,8 +114,8 @@ void PresetManagerDialog::reload() {
             QDir::toNativeSeparators(batchsmith::core::default_preset_directory());
     if (files.isEmpty()) {
         m_statusLabel->setText(
-                QStringLiteral("这个目录里还没有预设。\n在界面上配好之后用「文件 → 另存为…」"
-                               "存进来就能在这里管理。\n目录：%1")
+                QStringLiteral("这个目录里还没有预设。\n在界面上配好之后按 Ctrl+S（或「文件 → "
+                               "保存预设」）就会存到这里。\n目录：%1")
                         .arg(directory));
     } else {
         m_statusLabel->setText(
@@ -152,6 +162,7 @@ void PresetManagerDialog::updateButtons() {
     const bool one = paths.size() == 1;
     m_openButton->setEnabled(one);
     m_renameButton->setEnabled(one);
+    m_shortcutButton->setEnabled(one);
     m_removeButton->setEnabled(!paths.isEmpty());
 }
 
@@ -272,6 +283,30 @@ void PresetManagerDialog::removeSelected() {
                 QStringLiteral("删除预设"),
                 QStringLiteral("这几个删不掉：\n%1").arg(failed.join(QStringLiteral("\n"))));
     }
+}
+
+void PresetManagerDialog::createShortcut() {
+    const QStringList paths = selectedPaths();
+    if (paths.size() != 1) {
+        return;
+    }
+
+    QString error;
+    const QString created = create_preset_shortcut(paths.first(), m_shortcutDirectory, &error);
+    if (created.isEmpty()) {
+        QMessageBox::warning(this, QStringLiteral("创建快捷方式"), error);
+        return;
+    }
+
+    // 成功**不弹框**：给几个预设连着建快捷方式是正常用法，每建一个就要点一次
+    // "确定"很烦。结果写在状态行里（就在按钮上方，看得见），
+    // 只有失败才用弹框打断。
+    m_statusLabel->setText(
+            QStringLiteral("已创建快捷方式：%1\n双击它就会用「%2」这个预设打开 BatchSmith。"
+                           "以后改预设内容不用重建快捷方式 —— 它指向的是预设文件本身。")
+                    .arg(QDir::toNativeSeparators(created),
+                         QFileInfo(paths.first()).completeBaseName()));
+    m_statusLabel->setToolTip(QDir::toNativeSeparators(QFileInfo(created).absolutePath()));
 }
 
 void PresetManagerDialog::revealDirectory() {

@@ -131,10 +131,22 @@ export PATH="/c/Qt/6.7.2/mingw_64/bin:/c/Qt/Tools/mingw1120_64/bin:$PATH"
 
 # 启动时直接载入一个预设（位置参数与 --preset 等价）
 ./build/windows-mingw/bin/batchsmith.exe presets/example-rename.toml
+./build/windows-mingw/bin/batchsmith.exe --preset "presets/example-rename.toml"
 ```
 
-预设就是"当前的列表 + 表达式"，在「文件」菜单里可以新建 / 打开（`Ctrl+O`）/
-保存（`Ctrl+S`）/ 另存为 / 管理预设。
+预设就是"当前的列表 + 表达式"。界面分成两个菜单：
+
+| 菜单 | 内容 |
+|---|---|
+| 「文件」 | 新建 / 打开（`Ctrl+O`）/ 保存（`Ctrl+S`）/ 另存为 / 退出 |
+| 「预设」 | 最近用过的预设（直接列出来，点一下就切过去）/ 管理预设 / 打开预设文件夹 |
+
+**保存不问路径**：没存过的预设按 `Ctrl+S` 直接落进用户预设目录（重名自动加序号），
+要挑地方用「另存为」。
+
+想让某套预设"双击即用"：**「预设 → 管理预设」里选中它，点「创建快捷方式」** ——
+桌面会出现一个带着 `--preset` 参数的快捷方式（Windows `.lnk` / Linux `.desktop` /
+macOS `.command`），双击就是"用这套配置打开 BatchSmith"。
 
 **预设里不存绝对路径**：绑定的文件夹写成槽位 `${input}`，本机实际路径存在旁边的
 `<预设名>.local.toml` 里 —— 于是预设文件可以进版本控制、可以发给别人

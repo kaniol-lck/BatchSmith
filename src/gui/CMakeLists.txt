@@ -18,6 +18,8 @@ add_library(batchsmith_gui STATIC
     help/CheatsheetDialog.h
     preset/PresetManagerDialog.cpp
     preset/PresetManagerDialog.h
+    preset/PresetShortcut.cpp
+    preset/PresetShortcut.h
     result/ResultPanel.cpp
     result/ResultPanel.h
     table/ListSourceColumn.cpp
@@ -42,6 +44,14 @@ target_link_libraries(batchsmith_gui
         Qt6::Widgets)
 
 target_link_libraries(batchsmith_gui PRIVATE batchsmith_warnings)
+
+if(WIN32)
+    # 「创建快捷方式」走 COM 的 IShellLink/IPersistFile：
+    #   ole32 → CoInitializeEx / CoCreateInstance
+    #   uuid  → CLSID_ShellLink 与 IID_IShellLinkW 这两个 GUID 的**定义**
+    # （只声明不链接的话，是链接期才报 undefined reference，容易误以为是头文件问题）
+    target_link_libraries(batchsmith_gui PRIVATE ole32 uuid)
+endif()
 
 # Qt 的元对象/资源/界面编译管线。现在就打开，以便 mocs 链路在 P4 就被验证，
 # 而不是等到真正加信号槽时才发现问题。

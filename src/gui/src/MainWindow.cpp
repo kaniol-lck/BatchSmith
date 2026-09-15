@@ -40,8 +40,15 @@ using batchsmith::core::preset_sources;
 using batchsmith::core::PresetLoad;
 using batchsmith::core::SlotBindings;
 
-constexpr int kMaxRecentPresets = 5;
+/// 最近用过的预设最多记几条。
+///
+/// 「预设」菜单里它们**直接列出来**（不套子菜单），所以这个数字就是那个菜单的
+/// 前几行 —— 8 条还在"一眼扫得完"的范围内。
+constexpr int kMaxRecentPresets = 8;
 const char* const kRecentKey = "recentPresets";
+
+/// 还没保存过的预设，默认叫什么（文件名会按 `未命名预设 2.toml` 这样去重）
+const char* const kUntitledPresetName = "未命名预设";
 
 /// 预设名 = 文件名去掉扩展名。
 ///
@@ -167,34 +174,34 @@ void MainWindow::buildMenus() {
     m_saveAction = fileMenu->addAction(QStringLiteral("保存预设(&S)"));
     m_saveAction->setObjectName(QStringLiteral("savePresetAction"));
     m_saveAction->setShortcut(QKeySequence::Save);
-    m_saveAction->setStatusTip(QStringLiteral("保存到当前预设文件（还没存过时会先问你存到哪）"));
+    m_saveAction->setStatusTip(
+            QStringLiteral("保存到当前预设文件；还没存过时会存进预设目录（要挑地方用「另存为」）"));
     connect(m_saveAction, &QAction::triggered, this, &MainWindow::savePreset);
 
     auto* saveAsAction = fileMenu->addAction(QStringLiteral("另存为(&A)…"));
     saveAsAction->setObjectName(QStringLiteral("savePresetAsAction"));
     saveAsAction->setShortcut(QKeySequence::SaveAs);
+    saveAsAction->setStatusTip(QStringLiteral("存到别的地方，或另起一个名字（之后默认存到那里）"));
     connect(saveAsAction, &QAction::triggered, this, &MainWindow::savePresetAs);
-
-    fileMenu->addSeparator();
-
-    m_recentMenu = fileMenu->addMenu(QStringLiteral("最近打开(&R)"));
-    m_recentMenu->setObjectName(QStringLiteral("recentPresetsMenu"));
-    rebuildRecentMenu();
-
-    auto* manageAction = fileMenu->addAction(QStringLiteral("管理预设(&M)…"));
-    manageAction->setObjectName(QStringLiteral("managePresetsAction"));
-    manageAction->setStatusTip(QStringLiteral("列出预设目录里的全部预设，可打开 / 重命名 / 删除"));
-    connect(manageAction, &QAction::triggered, this, &MainWindow::showPresetManager);
-
-    auto* revealAction = fileMenu->addAction(QStringLiteral("打开预设文件夹"));
-    revealAction->setObjectName(QStringLiteral("revealPresetsAction"));
-    connect(revealAction, &QAction::triggered, this, &MainWindow::revealPresetDirectory);
 
     fileMenu->addSeparator();
 
     auto* quitAction = fileMenu->addAction(QStringLiteral("退出(&Q)"));
     quitAction->setShortcut(QKeySequence::Quit);
     connect(quitAction, &QAction::triggered, this, &QWidget::close);
+
+    // ---------------------------------------------------------------------
+    // 「预设」菜单：**换预设**用的，不是"文件操作"菜单
+    //
+    // 分开的理由：`文件 → 保存` 是每个程序都有的惯例位置，用户找它时是往「文件」
+    // 看的；而"我常用的那几套配置"是像书签一样的东西，越用越长。混在一个菜单里，
+    // 长起来的那一列会把"保存"挤到看不见的地方。
+    // ---------------------------------------------------------------------
+    m_presetMenu = menuBar()->addMenu(QStringLiteral("预设(&P)"));
+    m_presetMenu->setObjectName(QStringLiteral("presetMenu"));
+    rebuildPresetMenu();
+    // 预设文件可能被用户在别处删掉或改名，每次弹出前重扫一遍
+    connect(m_presetMenu, &QMenu::aboutToShow, this, &MainWindow::rebuildPresetMenu);
 
     QMenu* helpMenu = menuBar()->addMenu(QStringLiteral("帮助(&H)"));
 
@@ -292,10 +299,17 @@ void MainWindow::choosePresetToOpen() {
     if (path.isEmpty()) {
         return;  // 用户取消
     }
+    openPresetFromUi(path);
+}
+
+/// 打开一个预设：先问未保存的改动，再打开，失败时把原因说清楚。
+///
+/// 菜单项、最近列表、文件对话框三条入口都走它 —— 否则"从最近列表打开"那条路
+/// 很容易漏掉某一步（开始时就是漏了失败提示）。
+void MainWindow::openPresetFromUi(const QString& path) {
     if (!confirmDiscardChanges()) {
         return;
     }
-
     QString error;
     if (!openPreset(path, &error)) {
         QMessageBox::warning(this, QStringLiteral("打开预设失败"), error);
@@ -365,12 +379,29 @@ bool MainWindow::openPreset(const QString& path, QString* error) {
 // ---------------------------------------------------------------------------
 
 void MainWindow::savePreset() {
-    QString error;
-    if (m_presetPath.isEmpty()) {
-        savePresetAs();
+    if (!m_presetPath.isEmpty()) {
+        savePresetTo(m_presetPath, nullptr);
         return;
     }
-    savePresetTo(m_presetPath, &error);
+
+    // 从没存过（刚启动 / 刚「新建」）：**不问路径**，直接落到预设目录。
+    //
+    // 点「保存」时想的是"存起来别丢"，而不是"我要挑个地方"。预设目录是这个程序
+    // 自己的地方，存那儿下次一定找得到（「预设」菜单里就列着）。要挑地方有
+    // 「另存为」—— 那才是明确表达了"我要放到别处"的动作。
+    QString error;
+    if (!batchsmith::core::ensure_preset_directory(&error)) {
+        QMessageBox::warning(this, QStringLiteral("保存预设"), error);
+        return;
+    }
+
+    const QString base =
+            m_preset.name.isEmpty() ? QString::fromLatin1(kUntitledPresetName) : m_preset.name;
+    savePresetTo(batchsmith::core::unique_file_path(batchsmith::core::default_preset_directory(),
+                                                    base,
+                                                    QStringLiteral(".toml"),
+                                                    QString::fromLatin1(kUntitledPresetName)),
+                 nullptr);
 }
 
 void MainWindow::savePresetAs() {
@@ -380,9 +411,13 @@ void MainWindow::savePresetAs() {
         return;
     }
 
+    // 默认名字就是当前预设名：另存为最常见的用途是"在现有基础上改个变体"，
+    // 起名时有个像样的起点比每次都从「我的预设.toml」删起好
+    const QString base =
+            m_preset.name.isEmpty() ? QString::fromLatin1(kUntitledPresetName) : m_preset.name;
     const QString start = m_presetPath.isEmpty()
                                   ? QDir(batchsmith::core::default_preset_directory())
-                                            .filePath(QStringLiteral("我的预设.toml"))
+                                            .filePath(base + QStringLiteral(".toml"))
                                   : m_presetPath;
     QString path = QFileDialog::getSaveFileName(
             this, QStringLiteral("另存为预设"), start, QStringLiteral("预设文件 (*.toml)"));
@@ -433,14 +468,19 @@ bool MainWindow::savePresetTo(const QString& path, QString* error) {
     m_presetPath = path;
     setDirty(false);
     updateWindowTitle();
-    rememberRecent(path);
-    rebuildRecentMenu();
+    rememberRecent(path);  // 里面已经重建过「预设」菜单
 
     QString message = QStringLiteral("已保存：%1").arg(QDir::toNativeSeparators(path));
     if (!bindings_saved) {
         message += QStringLiteral("（路径绑定没存上：%1）").arg(bind_error);
     } else if (!bindings.isEmpty()) {
         message += QStringLiteral("（含 %1 个路径绑定）").arg(bindings.size());
+    }
+    // 存进预设目录的才提「预设」菜单 —— 另存到别处的文件不在那个菜单里，
+    // 提了反而让人去那儿找
+    if (QFileInfo(path).absolutePath() ==
+        QFileInfo(batchsmith::core::default_preset_directory()).absoluteFilePath()) {
+        message += QStringLiteral("　·　以后从「预设」菜单里可以一键切回来");
     }
     statusBar()->showMessage(message, 8000);
 
@@ -471,13 +511,10 @@ void MainWindow::showPresetManager() {
         connect(m_presetManager, &QDialog::accepted, this, [this] {
             // accepted 之后窗口才关、才 deleteLater，这里读它还是安全的
             const QString path = m_presetManager->selected_preset();
-            if (path.isEmpty() || !confirmDiscardChanges()) {
+            if (path.isEmpty()) {
                 return;
             }
-            QString error;
-            if (!openPreset(path, &error)) {
-                QMessageBox::warning(this, QStringLiteral("打开预设失败"), error);
-            }
+            openPresetFromUi(path);
         });
     }
 
@@ -498,7 +535,7 @@ void MainWindow::revealPresetDirectory() {
 }
 
 // ---------------------------------------------------------------------------
-// 最近打开
+// 预设菜单（最近用过的那些，直接列出来）
 // ---------------------------------------------------------------------------
 
 QStringList MainWindow::recentPresets() const {
@@ -530,36 +567,53 @@ void MainWindow::rememberRecent(const QString& path) {
 
     QSettings settings;
     settings.setValue(QString::fromLatin1(kRecentKey), list);
-    rebuildRecentMenu();
+    rebuildPresetMenu();
 }
 
-void MainWindow::rebuildRecentMenu() {
-    if (m_recentMenu == nullptr) {
+void MainWindow::rebuildPresetMenu() {
+    if (m_presetMenu == nullptr) {
         return;
     }
-    m_recentMenu->clear();
+    m_presetMenu->clear();
+
+    const QString current =
+            m_presetPath.isEmpty() ? QString() : QFileInfo(m_presetPath).absoluteFilePath();
 
     const QStringList list = recentPresets();
     if (list.isEmpty()) {
-        auto* empty = m_recentMenu->addAction(QStringLiteral("（还没有）"));
+        // 空态也把"怎么才能有"写出来 —— 一个只有灰条的菜单比没有菜单更让人困惑
+        auto* empty = m_presetMenu->addAction(QStringLiteral("（还没有预设）"));
+        empty->setObjectName(QStringLiteral("presetMenuEmpty"));
         empty->setEnabled(false);
-        return;
+        auto* hint = m_presetMenu->addAction(QStringLiteral("配好之后按 Ctrl+S 就会存进预设目录"));
+        hint->setEnabled(false);
+    } else {
+        for (const QString& path : list) {
+            const QFileInfo info(path);
+            auto* action = m_presetMenu->addAction(info.fileName());
+            action->setObjectName(QStringLiteral("presetMenuRecent"));
+            // 当前打开的那个打勾：菜单里一眼就能看出"我现在在哪一套里"
+            action->setCheckable(true);
+            action->setChecked(!current.isEmpty() && info.absoluteFilePath() == current);
+            action->setData(path);
+            action->setStatusTip(QDir::toNativeSeparators(path));
+            action->setToolTip(QDir::toNativeSeparators(path));
+            connect(action, &QAction::triggered, this, [this, path] { openPresetFromUi(path); });
+        }
     }
 
-    for (const QString& path : list) {
-        auto* action = m_recentMenu->addAction(QFileInfo(path).fileName());
-        action->setStatusTip(QDir::toNativeSeparators(path));
-        action->setData(path);
-        connect(action, &QAction::triggered, this, [this, path] {
-            if (!confirmDiscardChanges()) {
-                return;
-            }
-            QString error;
-            if (!openPreset(path, &error)) {
-                QMessageBox::warning(this, QStringLiteral("打开预设失败"), error);
-            }
-        });
-    }
+    m_presetMenu->addSeparator();
+
+    auto* manageAction = m_presetMenu->addAction(QStringLiteral("管理预设(&M)…"));
+    manageAction->setObjectName(QStringLiteral("managePresetsAction"));
+    manageAction->setStatusTip(
+            QStringLiteral("列出预设目录里的全部预设，可打开 / 重命名 / 删除 / 创建快捷方式"));
+    connect(manageAction, &QAction::triggered, this, &MainWindow::showPresetManager);
+
+    auto* revealAction = m_presetMenu->addAction(QStringLiteral("打开预设文件夹"));
+    revealAction->setObjectName(QStringLiteral("revealPresetsAction"));
+    revealAction->setStatusTip(QStringLiteral("在文件管理器里打开预设目录"));
+    connect(revealAction, &QAction::triggered, this, &MainWindow::revealPresetDirectory);
 }
 
 // ---------------------------------------------------------------------------

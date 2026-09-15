@@ -23,3 +23,13 @@ int capture_ui_shot(const QString& path);
 /// QT_QPA_PLATFORM=offscreen BATCHSMITH_HELP_SHOT=/tmp/help.png ./batchsmith_gui_tests
 /// ```
 int capture_help_shot(const QString& path);
+
+/// 把「管理预设」对话框渲染成 PNG。
+///
+/// 会往预设目录里临时写几份演示预设（含一份故意写坏的，好让"坏文件也要看得见"
+/// 这件事在图上成立），截完就删掉。
+///
+/// ```bash
+/// QT_QPA_PLATFORM=offscreen BATCHSMITH_PRESET_SHOT=/tmp/presets.png ./batchsmith_gui_tests
+/// ```
+int capture_preset_shot(const QString& path);

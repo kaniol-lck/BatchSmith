@@ -42,12 +42,23 @@ class QSplitter;
 ///
 /// ## 预设
 ///
-/// 「文件」菜单可以新建 / 打开 / 保存 / 另存为 / 管理预设；启动时也可以直接带上
-/// 一个预设文件（`batchsmith xxx.toml`）。窗口标题显示当前预设名与未保存标记，
-/// 关闭前若有未保存的改动会先问一句。
+/// 「文件」菜单管文件本身的动作：新建 / 打开 / 保存 / 另存为。**保存不需要先选路径**
+/// —— 没存过的预设直接落到预设目录（预设名做文件名，重名自动加序号），
+/// 要挑地方就用「另存为」。
+///
+/// 「预设」菜单是**换预设**用的：下拉第一段就是最近用过的那些预设，点一下就切过去
+/// （当前打开的那个带勾）。后面是管理预设与打开预设文件夹。
+///
+/// 之所以把"文件动作"与"挑预设"分成两个菜单：前者是 Save/Open 这类每个程序都有的
+/// 惯例位置，后者是"我常用的几套配置"这种**像书签一样**的东西。混在一个菜单里时，
+/// 越用越长的最近列表会把"保存"挤得找不到。
+///
+/// 启动时也可以直接带上一个预设文件（`batchsmith xxx.toml` 或 `--preset`）。
+/// 窗口标题显示当前预设名与未保存标记，关闭前若有未保存的改动会先问一句。
 ///
 /// 预设里的文件夹路径是**运行时槽位**（`${input}`），本机绑定的实际路径存在预设
 /// 旁边的 `.local.toml` 里 —— 于是预设本身可以进版本控制、可以发给别人。
+/// 「管理预设 → 创建快捷方式」能生成"带着这个预启动"的快捷方式，双击即用。
 class MainWindow : public QMainWindow {
     Q_OBJECT
 
@@ -113,8 +124,16 @@ private:
     [[nodiscard]] bool confirmDiscardChanges();
 
     void rememberRecent(const QString& path);
-    void rebuildRecentMenu();
+
+    /// 重建「预设」菜单：最近用过的那些直接列出来，当前打开的那个带勾。
+    ///
+    /// 每次菜单要弹出时都重建一次（用户可能在文件管理器里把预设删了 / 改了名），
+    /// 而重建只是在清掉旧 action、换上一批新的。
+    void rebuildPresetMenu();
     [[nodiscard]] QStringList recentPresets() const;
+
+    /// 打开一个预设，失败时弹框说明原因（菜单项与最近列表都走它）
+    void openPresetFromUi(const QString& path);
 
     QSplitter* m_topBottomSplitter = nullptr;
     ListSourcePanel* m_listPanel = nullptr;
@@ -130,6 +149,6 @@ private:
     QString m_presetPath;  ///< 空表示还没保存过（标题里显示"未命名"）
     bool m_dirty = false;
 
-    QMenu* m_recentMenu = nullptr;
+    QMenu* m_presetMenu = nullptr;
     QAction* m_saveAction = nullptr;
 };

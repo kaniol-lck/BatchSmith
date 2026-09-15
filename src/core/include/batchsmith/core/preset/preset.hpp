@@ -108,6 +108,24 @@ struct PresetLoad {
 /// 列出预设目录里的预设文件（按文件名排序）。目录不存在时返回空表，不算错。
 [[nodiscard]] QStringList list_preset_files();
 
+/// 在 `directory` 里挑一个**还空着**的文件名，返回完整路径。
+///
+/// `base_name` 先被净化：路径分隔符与文件系统非法字符换成下划线、首尾空白与
+/// 结尾的点去掉；结果为空（或净化后只剩 `.local` 这类）就退回 `fallback`。
+/// **以 `.local` 结尾的名字会被去掉那个后缀** —— 那个后缀是留给本机绑定文件的，
+/// 拿它当预设名会导致文件下次读不出来（`list_preset_files()` 会跳过它）。
+///
+/// 然后按 `名字.ext`、`名字 2.ext`、`名字 3.ext`… 依次试，最多到 999。
+///
+/// 为什么放在 core 而不是各调用点各写一遍：预设文件与"启动即加载"的快捷方式
+/// 都要这套（一个要 `*.toml`、一个要 `*.lnk` / `*.desktop`），而这类净化/去重
+/// 逻辑一旦分家就必然漂移 —— 比如某处忘了拒绝 `.local`，用户就会存出一个
+/// 自己打不开的预设。
+[[nodiscard]] QString unique_file_path(const QString& directory,
+                                       const QString& base_name,
+                                       const QString& suffix,
+                                       const QString& fallback = QStringLiteral("未命名"));
+
 [[nodiscard]] bool save_preset(const Preset& preset, const QString& path, QString* error);
 [[nodiscard]] PresetLoad load_preset(const QString& path);
 

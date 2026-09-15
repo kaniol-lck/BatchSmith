@@ -9,7 +9,7 @@ class QPushButton;
 class QTreeWidget;
 class QTreeWidgetItem;
 
-/// 预设管理：列出预设目录里的文件，可以打开、重命名、删除。
+/// 预设管理：列出预设目录里的文件，可以打开、重命名、删除、**创建快捷方式**。
 ///
 /// 为什么要有这个对话框（而不是让用户去文件管理器里翻）：
 ///   * 预设目录在各平台的路径不一样，用户未必知道在哪；
@@ -31,12 +31,18 @@ public:
     /// 重新扫描预设目录并刷新列表
     void reload();
 
+    /// 快捷方式建到哪个目录。默认（空）表示用 `default_shortcut_directory()`
+    /// —— 也就是桌面。测试把它指到临时目录，免得在开发机的桌面上留东西。
+    void setShortcutDirectory(const QString& directory) { m_shortcutDirectory = directory; }
+
     // 供离屏测试使用
     [[nodiscard]] QTreeWidget* tree() const { return m_tree; }
 
     [[nodiscard]] QPushButton* openButton() const { return m_openButton; }
 
     [[nodiscard]] QPushButton* renameButton() const { return m_renameButton; }
+
+    [[nodiscard]] QPushButton* shortcutButton() const { return m_shortcutButton; }
 
     [[nodiscard]] QPushButton* removeButton() const { return m_removeButton; }
 
@@ -48,9 +54,10 @@ private:
 
     void openSelected();
 
-    // 三个动作刻意做成 public 之外也能被测试直接触发（点按钮就是调它们）
+    // 这几个动作刻意做成 public 之外也能被测试直接触发（点按钮就是调它们）
     void renameSelected();
     void removeSelected();
+    void createShortcut();
     void revealDirectory();
 
     void addRow(const QString& path);
@@ -59,6 +66,8 @@ private:
     QLabel* m_statusLabel = nullptr;
     QPushButton* m_openButton = nullptr;
     QPushButton* m_renameButton = nullptr;
+    QPushButton* m_shortcutButton = nullptr;
     QPushButton* m_removeButton = nullptr;
+    QString m_shortcutDirectory;
     QString m_selected;
 };

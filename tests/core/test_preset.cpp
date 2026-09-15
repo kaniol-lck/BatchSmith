@@ -41,6 +41,7 @@ using batchsmith::core::save_bindings;
 using batchsmith::core::save_preset;
 using batchsmith::core::SlotBindings;
 using batchsmith::core::slots_in;
+using batchsmith::core::unique_file_path;
 
 [[nodiscard]] QString S(const char16_t* text) {
     return QString::fromUtf16(text);
@@ -639,4 +640,85 @@ TEST_CASE("示例预设必须始终可解析（它会随时间腐坏，得有人
     CHECK(errors.isEmpty());
     REQUIRE(sources.size() == 2);
     CHECK(sources.at(0).items.size() == 2);
+}
+
+// ===========================================================================
+// 默认文件名：净化 + 去重
+//
+// 「保存预设不再弹地址选择」这条改成默认之后，文件名是**程序替用户定的**——
+// 于是"名字能不能用"从一个手输错误变成了一个必须自己兜住的保证。
+// ===========================================================================
+
+TEST_CASE("文件名：不能当文件名的字符要被换掉，而不是让保存失败") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QDir base(dir.path());
+
+    // 路径分隔符：不换掉的话会往子目录里写（失败），或者更糟 ——
+    // 用相对路径逃出目标目录
+    CHECK(unique_file_path(dir.path(), S(u"番剧/第2季"), S(u".toml")) ==
+          base.filePath(S(u"番剧_第2季.toml")));
+    CHECK(unique_file_path(dir.path(), S(u"a\\b"), S(u".toml")) == base.filePath(S(u"a_b.toml")));
+    // Windows 上直接非法的几个
+    CHECK(unique_file_path(dir.path(), S(u"a:b?c*d"), S(u".toml")) ==
+          base.filePath(S(u"a_b_c_d.toml")));
+
+    // 首尾空白与结尾的点：Windows 会**静默**去掉，于是"存了但名字不是你想的"
+    CHECK(unique_file_path(dir.path(), S(u"  名字  "), S(u".toml")) ==
+          base.filePath(S(u"名字.toml")));
+    CHECK(unique_file_path(dir.path(), S(u"名字..."), S(u".toml")) ==
+          base.filePath(S(u"名字.toml")));
+
+    // 空名字退回兜底名，而不是生成一个 `.toml`（在文件管理器里默认隐藏，
+    // 用户会以为没存上）
+    CHECK(unique_file_path(dir.path(), QString(), S(u".toml"), S(u"未命名预设")) ==
+          base.filePath(S(u"未命名预设.toml")));
+    CHECK(unique_file_path(dir.path(), S(u"   "), S(u".toml")) == base.filePath(S(u"未命名.toml")));
+}
+
+TEST_CASE("文件名：拒绝 .local 结尾 —— 那是本机绑定文件的后缀") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QDir base(dir.path());
+
+    // 用户把预设命名成 `x.local`：照原样会存成 `x.local.toml`，而
+    // list_preset_files() 会把它当绑定文件跳过 —— 用户看到的是"存了，但没了"
+    CHECK(unique_file_path(dir.path(), S(u"x.local"), S(u".toml")) == base.filePath(S(u"x.toml")));
+    // 叠了好几层也一样处理（大小写不敏感：Windows 上不分大小写）
+    CHECK(unique_file_path(dir.path(), S(u"y.LOCAL.local"), S(u".toml")) ==
+          base.filePath(S(u"y.toml")));
+    // 只有 `.local` 本身时退回兜底名
+    CHECK(unique_file_path(dir.path(), S(u".local"), S(u".toml"), S(u"预设")) ==
+          base.filePath(S(u"预设.toml")));
+}
+
+TEST_CASE("文件名：重名依次加序号，且不动已有的文件") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QDir base(dir.path());
+
+    CHECK(unique_file_path(dir.path(), S(u"番剧"), S(u".toml")) == base.filePath(S(u"番剧.toml")));
+    make_files(dir.path(), {S(u"番剧.toml")});
+
+    CHECK(unique_file_path(dir.path(), S(u"番剧"), S(u".toml")) ==
+          base.filePath(S(u"番剧 2.toml")));
+    make_files(dir.path(), {S(u"番剧 2.toml")});
+
+    CHECK(unique_file_path(dir.path(), S(u"番剧"), S(u".toml")) ==
+          base.filePath(S(u"番剧 3.toml")));
+
+    // 去重不能靠覆盖实现：已有的两个文件必须原封不动
+    CHECK(QFileInfo::exists(base.filePath(S(u"番剧.toml"))));
+    CHECK(QFileInfo::exists(base.filePath(S(u"番剧 2.toml"))));
+    CHECK_FALSE(QFileInfo::exists(base.filePath(S(u"番剧 3.toml"))));
+}
+
+TEST_CASE("文件名：后缀是调用方给的，同一套逻辑给快捷方式也能用") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QDir base(dir.path());
+
+    CHECK(unique_file_path(dir.path(), S(u"番剧"), S(u".lnk")) == base.filePath(S(u"番剧.lnk")));
+    CHECK(unique_file_path(dir.path(), S(u"番剧"), S(u".desktop"), S(u"BatchSmith")) ==
+          base.filePath(S(u"番剧.desktop")));
 }

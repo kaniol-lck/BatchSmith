@@ -579,9 +579,19 @@ QString cheatsheet_text() {
     lines.append(section_title(u"sec-preset"));
     lines.append(QString());
     lines.append(QStringLiteral("    · 预设 = 当前的列表 + 表达式，存成一个 .toml 文件。"));
-    lines.append(QStringLiteral("      界面：文件 → 打开预设(Ctrl+O) / 保存(Ctrl+S) / 另存为 /"));
-    lines.append(QStringLiteral("      管理预设。启动时也能直接带上它："));
+    lines.append(QStringLiteral("      · 存：「文件 → 保存预设(Ctrl+S)」不用先挑路径 —— 没存过的"));
+    lines.append(
+            QStringLiteral("        直接落进预设目录（重名自动加序号）；要挑地方用「另存为」。"));
+    lines.append(
+            QStringLiteral("      · 取：「预设」菜单里直接列着最近用过的，点一下就切过去（当前"));
+    lines.append(QStringLiteral("        那个带勾）；也可以用「文件 → 打开预设(Ctrl+O)」。"));
+    lines.append(
+            QStringLiteral("      · 想让某套预设「双击即用」：在「预设 → 管理预设」里选中它，点"));
+    lines.append(QStringLiteral(
+            "        「创建快捷方式」，桌面就会出现一个带着 --preset 参数的快捷方式。"));
+    lines.append(QStringLiteral("      · 启动时直接带上预设也可以："));
     lines.append(QStringLiteral("          batchsmith 我的预设.toml"));
+    lines.append(QStringLiteral("          batchsmith --preset \"我的预设.toml\""));
     lines.append(QString());
     lines.append(QStringLiteral("    · 预设里不存绝对路径：绑定的文件夹写成槽位 ${input}，"));
     lines.append(QStringLiteral("      本机实际路径存在旁边的 <预设名>.local.toml 里。"));

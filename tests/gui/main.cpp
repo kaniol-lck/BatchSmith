@@ -44,5 +44,11 @@ int main(int argc, char** argv) {
         return capture_help_shot(QString::fromLocal8Bit(helpShotPath));
     }
 
+    // 管理预设对话框：里面有「创建快捷方式」这个按钮，单独一张图才看得清
+    const QByteArray presetShotPath = qgetenv("BATCHSMITH_PRESET_SHOT");
+    if (!presetShotPath.isEmpty()) {
+        return capture_preset_shot(QString::fromLocal8Bit(presetShotPath));
+    }
+
     return doctest::Context(argc, argv).run();
 }

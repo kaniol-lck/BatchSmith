@@ -50,6 +50,7 @@ if(BATCHSMITH_BUILD_GUI)
         gui/test_cheatsheet_dialog.cpp
         gui/test_list_source_column.cpp
         gui/test_main_window.cpp
+        gui/test_preset_shortcut.cpp
         gui/test_preset_ui.cpp
         gui/ui_shot.cpp
         gui/ui_shot.hpp)

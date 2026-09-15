@@ -13,10 +13,15 @@
 #include <QStringListModel>
 #include <QTemporaryDir>
 #include <QToolButton>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QWidget>
 
 #include "MainWindow.h"
+#include "batchsmith/core/preset/preset.hpp"
 #include "help/CheatsheetDialog.h"
+#include "preset/PresetManagerDialog.h"
+#include "preset/PresetShortcut.h"
 #include "table/ListSourceColumn.h"
 
 namespace {
@@ -159,4 +164,98 @@ int capture_help_shot(const QString& path) {
     dialog.show();
     QApplication::processEvents();
     return dialog.grab().save(path) ? 0 : 1;
+}
+
+/// 往预设目录里放几份演示预设（含一份故意写坏的），返回写进去的文件路径。
+///
+/// 用真实的文件而不是伪造表格行：截图是给人核对界面的，摆拍的行没有意义 ——
+/// 而且"坏文件也要列出来并标红"这条只有在真有一个坏文件时才看得见。
+[[nodiscard]] QStringList write_demo_presets() {
+    QString error;
+    if (!batchsmith::core::ensure_preset_directory(&error)) {
+        std::fprintf(stderr, "[shot] 建不了预设目录：%s\n", qUtf8Printable(error));
+        return {};
+    }
+
+    const QString directory = batchsmith::core::default_preset_directory();
+
+    const struct {
+        const char* file;
+        const char* text;
+    } demos[] = {
+            {"番剧重命名.toml",
+             "[preset]\nname = '番剧重命名'\nversion = 1\n\n"
+             "[[lists]]\nid = 'list1'\n\n"
+             "  [lists.source]\n  kind = 'dir'\n  path = '${input}'\n  filter = '*.mkv'\n\n"
+             "[[lists]]\nid = 'list2'\nitems = ['01', '02', '09', '10']\n\n"
+             "[output]\ntemplate = 'mv \"$list1[i]$\" \"第$list2[i]$话 正片.mkv\"'\n"},
+            {"字幕批量改名.toml",
+             "[preset]\nname = '字幕批量改名'\nversion = 1\n\n"
+             "[[lists]]\nid = 'list1'\n\n"
+             "  [lists.source]\n  kind = 'dir'\n  path = '${input}'\n  filter = '*.ass|*.srt'\n\n"
+             "[[lists]]\nid = 'list2'\nitems = ['简', '繁']\n\n"
+             "[output]\ntemplate = 'mv \"$list1[i]$\" \"$list2[j]$-$list1[i]$'\n"},
+            {"临时试的东西.toml",
+             "[preset]\nname = '临时试的东西'\nversion = 1\n\n"
+             "[output]\ntemplate = 'echo $list1[i]$'\n"},
+            {"手改坏了.toml", "这不是合法的 TOML\n"},
+    };
+
+    QStringList written;
+    for (const auto& demo : demos) {
+        const QString file = QDir(directory).filePath(QString::fromUtf8(demo.file));
+        QFile handle(file);
+        if (handle.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            handle.write(demo.text);
+            handle.close();
+            written.append(file);
+        }
+    }
+    return written;
+}
+
+int capture_preset_shot(const QString& path) {
+    const QStringList written = write_demo_presets();
+
+    PresetManagerDialog dialog;
+    dialog.resize(820, 460);
+    dialog.reload();
+
+    // 选中第一行：这样「创建快捷方式」在图上呈现"可用"的样子，
+    // 否则截图里那个按钮永远是灰的，看不出它是能点的
+    if (auto* first = dialog.tree()->topLevelItem(0)) {
+        first->setSelected(true);
+    }
+
+    dialog.show();
+    QApplication::processEvents();
+
+    // 自证输出：截图是在无图形环境里生成的，生成者看不到图
+    int rows = 0;
+    int unreadable = 0;
+    for (int row = 0; row < dialog.tree()->topLevelItemCount(); ++row) {
+        const QTreeWidgetItem* item = dialog.tree()->topLevelItem(row);
+        if (item->text(0) == QStringLiteral("（读不了）")) {
+            ++unreadable;
+        }
+        ++rows;
+    }
+    std::fprintf(stderr, "[shot] %s\n", qUtf8Printable(QDir::toNativeSeparators(path)));
+    std::fprintf(
+            stderr,
+            "        预设目录 = %s\n"
+            "        列表 %d 行（其中读不了 %d 行）\n"
+            "        创建快捷方式按钮 = %s（扩展名 %s）\n",
+            qUtf8Printable(QDir::toNativeSeparators(batchsmith::core::default_preset_directory())),
+            rows,
+            unreadable,
+            dialog.shortcutButton()->isEnabled() ? "可用" : "不可用",
+            qUtf8Printable(shortcut_suffix()));
+
+    const bool saved = dialog.grab().save(path);
+
+    for (const QString& file : written) {
+        QFile::remove(file);
+    }
+    return saved ? 0 : 1;
 }

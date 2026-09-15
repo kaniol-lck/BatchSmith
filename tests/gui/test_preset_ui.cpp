@@ -13,6 +13,7 @@
 #include <QApplication>
 #include <QCheckBox>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
 #include <QFile>
@@ -21,6 +22,7 @@
 #include <QLineEdit>
 #include <QListView>
 #include <QMenu>
+#include <QProcess>
 #include <QPushButton>
 #include <QSettings>
 #include <QString>
@@ -34,6 +36,7 @@
 #include "batchsmith/core/preset/preset.hpp"
 #include "editor/ExpressionBar.h"
 #include "preset/PresetManagerDialog.h"
+#include "preset/PresetShortcut.h"
 #include "table/ListSourceColumn.h"
 #include "table/ListSourcePanel.h"
 
@@ -456,36 +459,228 @@ TEST_CASE("预设：仓库里的示例预设能真的打开（用户第一个会
     CHECK_FALSE(window.expressionBar()->expression().isEmpty());
 }
 
-TEST_CASE("预设：最近打开记住路径，并能重开") {
+TEST_CASE("预设：菜单里直接列出最近用过的，当前那个带勾") {
     QTemporaryDir presetDir;
     REQUIRE(presetDir.isValid());
-    const QString path = QDir(presetDir.path()).filePath(S(u"最近.toml"));
+    const QString first = QDir(presetDir.path()).filePath(S(u"最近.toml"));
+    const QString second = QDir(presetDir.path()).filePath(S(u"另一套.toml"));
 
-    {
+    for (const QString& path : {first, second}) {
         QFile file(path);
         REQUIRE(file.open(QIODevice::WriteOnly));
-        file.write("[preset]\nname = '最近'\nversion = 1\n\n[output]\ntemplate = 'x'\n");
+        file.write("[preset]\nname = 'x'\nversion = 1\n\n[output]\ntemplate = 'x'\n");
         file.close();
     }
 
-    QSettings settings;
-    settings.remove(QStringLiteral("recentPresets"));
-    settings.sync();
+    clear_recent();
 
     MainWindow window;
-    REQUIRE(window.openPreset(path, nullptr));
-
-    // 「最近打开」子菜单里应当出现它
-    auto* menu = window.findChild<QMenu*>(QStringLiteral("recentPresetsMenu"));
+    auto* menu = window.findChild<QMenu*>(QStringLiteral("presetMenu"));
     REQUIRE(menu != nullptr);
-    REQUIRE_FALSE(menu->actions().isEmpty());
-    CHECK(menu->actions().first()->text() == S(u"最近.toml"));
-    CHECK(menu->actions().first()->data().toString() == path);
 
-    // 重开一次不该出现两条
-    REQUIRE(window.openPreset(path, nullptr));
-    CHECK(menu->actions().size() == 1);
+    // 一个都没用过时给一句"怎么才能有"，而不是一个一片空白的菜单
+    REQUIRE(menu->actions().size() >= 2);
+    CHECK(menu->actions().first()->text().contains(S(u"还没有预设")));
+    CHECK_FALSE(menu->actions().first()->isEnabled());
 
-    settings.remove(QStringLiteral("recentPresets"));
-    settings.sync();
+    // 最近用过的**直接列在菜单里**（不套子菜单）：这个菜单存在的唯一理由是
+    // "点一下就切过去"，多一层就白做了
+    const auto recent_actions = [menu] {
+        QList<QAction*> found;
+        for (QAction* action : menu->actions()) {
+            if (action->objectName() == QLatin1String("presetMenuRecent")) {
+                found.append(action);
+            }
+        }
+        return found;
+    };
+
+    REQUIRE(window.openPreset(first, nullptr));
+    REQUIRE(recent_actions().size() == 1);
+    CHECK(recent_actions().first()->text() == S(u"最近.toml"));
+    CHECK(recent_actions().first()->data().toString() == first);
+    // 当前打开的那个带勾 —— 菜单里一眼看得出"我现在在哪一套里"
+    CHECK(recent_actions().first()->isChecked());
+
+    // 换另一套：它排到最前，勾跟着走
+    REQUIRE(window.openPreset(second, nullptr));
+    REQUIRE(recent_actions().size() == 2);
+    CHECK(recent_actions().at(0)->text() == S(u"另一套.toml"));
+    CHECK(recent_actions().at(0)->isChecked());
+    CHECK_FALSE(recent_actions().at(1)->isChecked());
+
+    // 重开同一个不该出现两条
+    REQUIRE(window.openPreset(first, nullptr));
+    CHECK(recent_actions().size() == 2);
+
+    // 文件被外部删掉后不该还留在菜单里 —— 留着点了必然失败，比空着更烦
+    REQUIRE(QFile::remove(second));
+    REQUIRE(window.openPreset(first, nullptr));  // 打开会重建菜单
+    CHECK(recent_actions().size() == 1);
+    CHECK(recent_actions().first()->text() == S(u"最近.toml"));
+
+    clear_recent();
+}
+
+TEST_CASE("预设：保存不问路径，直接落进预设目录") {
+    clear_recent();
+
+    const QString directory = batchsmith::core::default_preset_directory();
+    REQUIRE(batchsmith::core::ensure_preset_directory());
+    // 记下已有的文件，跑完只删自己造的那些 —— 这个目录是跨用例共享的
+    const QStringList before = QDir(directory).entryList(QDir::Files);
+
+    {
+        MainWindow window;
+        set_items(window, QStringLiteral("list1"), {S(u"a"), S(u"b")});
+        window.expressionBar()->setExpression(S(u"$list1[i]$"));
+
+        auto* save = window.findChild<QAction*>(QStringLiteral("savePresetAction"));
+        REQUIRE(save != nullptr);
+        save->trigger();  // 关键：**不弹文件对话框**，这一行能直接跑完
+
+        CHECK_FALSE(window.hasUnsavedChanges());
+        CHECK_FALSE(window.presetPath().isEmpty());
+        CHECK(QFileInfo(window.presetPath()).absolutePath() ==
+              QFileInfo(directory).absoluteFilePath());
+
+        // 真的落盘了，而且读得回来
+        const auto loaded = load_preset(window.presetPath());
+        REQUIRE(loaded.ok());
+        CHECK(loaded.preset.template_text == S(u"$list1[i]$"));
+
+        // 再存一次不该另开一个文件（路径已经定了）
+        const QString path = window.presetPath();
+        set_items(window, QStringLiteral("list1"), {S(u"a"), S(u"b"), S(u"c")});
+        CHECK(window.hasUnsavedChanges());
+        save->trigger();
+        CHECK(window.presetPath() == path);
+        CHECK_FALSE(window.hasUnsavedChanges());
+        QFile::remove(path);
+    }
+
+    {
+        // 第二个新建的窗口：默认文件名重了要加序号，不能把上一份盖掉
+        MainWindow window;
+        set_items(window, QStringLiteral("list1"), {S(u"z")});
+        auto* save = window.findChild<QAction*>(QStringLiteral("savePresetAction"));
+        REQUIRE(save != nullptr);
+        save->trigger();
+
+        const QString path = window.presetPath();
+        CHECK_FALSE(path.isEmpty());
+        QFile::remove(path);
+    }
+
+    for (const QString& name : QDir(directory).entryList(QDir::Files)) {
+        if (!before.contains(name)) {
+            QFile::remove(QDir(directory).filePath(name));
+        }
+    }
+}
+
+TEST_CASE("预设：管理对话框能给预设建快捷方式（建到指定目录）") {
+    const QString directory = batchsmith::core::default_preset_directory();
+    REQUIRE(batchsmith::core::ensure_preset_directory());
+
+    QTemporaryDir shortcutDir;
+    REQUIRE(shortcutDir.isValid());
+
+    const QString path = QDir(directory).filePath(S(u"建快捷方式.toml"));
+    {
+        QFile file(path);
+        REQUIRE(file.open(QIODevice::WriteOnly));
+        file.write("[preset]\nname = '建快捷方式'\nversion = 1\n\n[output]\ntemplate = 'x'\n");
+        file.close();
+    }
+
+    PresetManagerDialog dialog;
+    // 不往开发机真实桌面上放东西
+    dialog.setShortcutDirectory(shortcutDir.path());
+    dialog.reload();
+
+    // 没选中时不能建（与打开 / 重命名一致）
+    CHECK_FALSE(dialog.shortcutButton()->isEnabled());
+
+    QTreeWidgetItem* target = nullptr;
+    for (int row = 0; row < dialog.tree()->topLevelItemCount(); ++row) {
+        QTreeWidgetItem* item = dialog.tree()->topLevelItem(row);
+        if (item->text(3) == S(u"建快捷方式.toml")) {
+            target = item;
+            break;
+        }
+    }
+    REQUIRE(target != nullptr);
+    target->setSelected(true);
+    CHECK(dialog.shortcutButton()->isEnabled());
+
+    dialog.shortcutButton()->click();
+
+    // 关键：建出来的东西**真的能用** —— 指向本程序的 exe，带着这个预设的绝对路径
+    const QFileInfoList created = QDir(shortcutDir.path()).entryInfoList(QDir::Files, QDir::Name);
+    REQUIRE(created.size() == 1);
+    CHECK(created.first().completeBaseName() == S(u"建快捷方式"));
+
+    ShortcutTarget shortcut;
+    QString error;
+    REQUIRE_MESSAGE(read_shortcut(created.first().absoluteFilePath(), &shortcut, &error),
+                    error.toStdString());
+    CHECK(shortcut.program == QCoreApplication::applicationFilePath());
+    CHECK(shortcut.preset_path() == QFileInfo(path).absoluteFilePath());
+
+    // 成功**不弹框**（连着建几个时不该每建一个点一次"确定"），结果写在状态行里
+    CHECK(dialog.statusLabel()->text().contains(created.first().fileName()));
+    CHECK(dialog.statusLabel()->text().contains(S(u"建快捷方式")));
+
+    QFile::remove(path);
+}
+
+TEST_CASE("预设：真正的可执行文件接受 --preset 启动参数") {
+    // 「创建快捷方式」生成的就是 `exe --preset "<文件>"`，所以"这个命令行能用"
+    // 是那条功能的**全部价值所在**。上面那条用例测的是 `MainWindow::openPreset()`
+    // （= main() 里该做的那两步），不是 main() 自己 —— 参数解析一旦坏掉，
+    // 快捷方式双击就只会开出一个空窗口，而且没有任何东西会报警。
+    //
+    // 这里只断言"没有当场死掉"：窗口程序要用户关掉才退出，拿不到有意义的退出码。
+    // （因此"弹了个错误框卡在那儿"也会算通过 —— 这是这条用例的已知边界。）
+    const QString binDir = QCoreApplication::applicationDirPath();
+    const QStringList candidates{
+            QDir(binDir).filePath(QStringLiteral("batchsmith.exe")),
+            QDir(binDir).filePath(QStringLiteral("batchsmith")),
+            // macOS 下是可执行文件在 bundle 里面
+            QDir(binDir).filePath(QStringLiteral("batchsmith.app/Contents/MacOS/batchsmith"))};
+
+    QString exe;
+    for (const QString& candidate : candidates) {
+        if (QFileInfo(candidate).isExecutable()) {
+            exe = candidate;
+            break;
+        }
+    }
+    if (exe.isEmpty()) {
+        // 只构建了测试目标、或平台布局不同时跳过，而不是假装通过
+        WARN("找不到 batchsmith 可执行文件（两个目标不在同一个输出目录？），跳过");
+        return;
+    }
+
+    QTemporaryDir presetDir;
+    REQUIRE(presetDir.isValid());
+    const QString path = QDir(presetDir.path()).filePath(S(u"命令行.toml"));
+    {
+        QFile file(path);
+        REQUIRE(file.open(QIODevice::WriteOnly));
+        file.write("[preset]\nname = '命令行'\nversion = 1\n\n[output]\ntemplate = 'x'\n");
+        file.close();
+    }
+
+    // ⚠️ 这一条会在**真实**配置里留下一条"最近用过"的记录（子进程没有测试模式）。
+    // 那个路径随后随临时目录消失，下次读取时会被自动丢掉 ——
+    // 为了覆盖真正的入口，这个代价可以接受。
+    QProcess process;
+    process.start(exe, {QStringLiteral("--preset"), path});
+    REQUIRE(process.waitForStarted());
+    // false = 还在跑 = 没当场死掉
+    CHECK_FALSE(process.waitForFinished(1500));
+    process.kill();
+    process.waitForFinished();
 }
