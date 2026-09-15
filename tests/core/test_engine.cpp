@@ -226,13 +226,40 @@ TEST_CASE("生成类 helper：seq / rand 可复现") {
 
 TEST_CASE("文本类 helper") {
     CHECK(rows_of(u"$upper('abc')$-$trim('  x  ')$", {}).first() == S(u"ABC-x"));
-    CHECK(rows_of(u"$replace('a1b2','[0-9]','#')$", {}).first() == S(u"a#b#"));
     CHECK(rows_of(u"$pad('7',3,'0')$", {}).first() == S(u"700"));
     CHECK(rows_of(u"$match('abc123','[0-9]+')$", {}).first() == S(u"123"));
     CHECK(rows_of(u"$fmt('%s=%d','n',7)$", {}).first() == S(u"n=7"));
     CHECK(rows_of(u"$regex('a1b2','[0-9]')[1]$", {}).first() == S(u"1"));  // 无捕获组：整个匹配
     CHECK(rows_of(u"$regex('a1b2','([0-9])')[1]$", {}).first() == S(u"1"));  // 有捕获组：取组
     CHECK(rows_of(u"$count(regex('a1b2','([0-9])'))$", {}).first() == S(u"1"));
+}
+
+TEST_CASE("文本类 helper：regex 的第三个参数直接取第 n 项") {
+    CHECK(rows_of(u"$regex('第07话', [[第(\\d+)话]], 1)$", {}).first() == S(u"07"));
+    // 多个捕获组时 n 就是组号
+    CHECK(rows_of(u"$regex('2026-09-15', [[(\\d+)-(\\d+)]] , 2)$", {}).first() == S(u"09"));
+    // 越界与不匹配都给空串（与列表越界的约定一致），不会像取下标那样得到 nil
+    CHECK(rows_of(u"$regex('第07话', [[第(\\d+)话]], 9)$", {}).first() == S(u""));
+    CHECK(rows_of(u"$regex('没有数字', [[(\\d+)]] , 1)$", {}).first() == S(u""));
+    // 不给 n 时仍是列表
+    CHECK(rows_of(u"$count(regex('2026-09-15', [[(\\d+)-(\\d+)]]))$", {}).first() == S(u"2"));
+}
+
+TEST_CASE("文本类 helper：replace 是字面替换，resub 才是正则") {
+    // 字面：`.` 就是点本身，`[0-9]` 就是这五个字符
+    CHECK(rows_of(u"$replace('2026.09.15','.','-')$", {}).first() == S(u"2026-09-15"));
+    CHECK(rows_of(u"$replace('a1b2','[0-9]','#')$", {}).first() == S(u"a1b2"));
+    CHECK(rows_of(u"$replace('a-b-c','-','')$", {}).first() == S(u"abc"));  // 全部出现都换
+
+    // 正则：全局替换 + 捕获组引用
+    CHECK(rows_of(u"$resub('a1b2','[0-9]','#')$", {}).first() == S(u"a#b#"));
+    CHECK(rows_of(u"$resub('第07话', [[第(\\d+)话]], [[第\\1话 正片]])$", {}).first() ==
+          S(u"第07话 正片"));
+
+    // 正则串写坏了当场报错，而不是静默按字面处理
+    CHECK_FALSE(evaluate_template(S(u"$resub('x','(','y')$"), {}).ok());
+    // 空串在字面替换里是"每个字符之间都插一段"，明令禁止
+    CHECK_FALSE(evaluate_template(S(u"$replace('x','','y')$"), {}).ok());
 }
 
 TEST_CASE("路径类 helper 同时接受 / 与 \\") {

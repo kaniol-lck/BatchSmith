@@ -5,9 +5,11 @@
 #include <QDesktopServices>
 #include <QDir>
 #include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QIcon>
 #include <QInputDialog>
 #include <QLabel>
 #include <QMessageBox>
@@ -23,6 +25,7 @@
 namespace {
 
 using batchsmith::core::bindings_path_for;
+using batchsmith::core::load_local_settings;
 using batchsmith::core::load_preset;
 
 }  // namespace
@@ -30,19 +33,28 @@ using batchsmith::core::load_preset;
 PresetManagerDialog::PresetManagerDialog(QWidget* parent) : QDialog(parent) {
     setObjectName(QStringLiteral("presetManagerDialog"));
     setWindowTitle(QStringLiteral("管理预设"));
-    resize(680, 440);
+    resize(900, 480);
 
     m_tree = new QTreeWidget(this);
     m_tree->setObjectName(QStringLiteral("presetTree"));
     m_tree->setRootIsDecorated(false);
     m_tree->setAlternatingRowColors(true);
     m_tree->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    m_tree->setColumnCount(4);
+    m_tree->setColumnCount(6);
     m_tree->setHeaderLabels({QStringLiteral("预设"),
                              QStringLiteral("列表"),
+                             QStringLiteral("输出表达式"),
+                             QStringLiteral("备注"),
                              QStringLiteral("修改时间"),
                              QStringLiteral("文件")});
-    m_tree->header()->setStretchLastSection(true);
+    m_tree->header()->setStretchLastSection(false);
+    // 「输出表达式」是最宽、也最需要看清的一列；「文件」只是"到底是哪个文件"的兜底
+    m_tree->header()->setSectionResizeMode(ColumnPreset, QHeaderView::ResizeToContents);
+    m_tree->header()->setSectionResizeMode(ColumnLists, QHeaderView::ResizeToContents);
+    m_tree->header()->setSectionResizeMode(ColumnTemplate, QHeaderView::Stretch);
+    m_tree->header()->setSectionResizeMode(ColumnNote, QHeaderView::ResizeToContents);
+    m_tree->header()->setSectionResizeMode(ColumnModified, QHeaderView::ResizeToContents);
+    m_tree->header()->setSectionResizeMode(ColumnFile, QHeaderView::ResizeToContents);
     connect(m_tree, &QTreeWidget::itemSelectionChanged, this, &PresetManagerDialog::updateButtons);
     connect(m_tree, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem*, int) {
         openSelected();  // 双击即打开
@@ -62,17 +74,30 @@ PresetManagerDialog::PresetManagerDialog(QWidget* parent) : QDialog(parent) {
     m_renameButton->setObjectName(QStringLiteral("presetRenameButton"));
     connect(m_renameButton, &QPushButton::clicked, this, &PresetManagerDialog::renameSelected);
 
+    m_noteButton = new QPushButton(QStringLiteral("备注…"), this);
+    m_noteButton->setObjectName(QStringLiteral("presetNoteButton"));
+    m_noteButton->setStatusTip(QStringLiteral("写一句「这套是干什么的」，跟着预设文件走"));
+    connect(m_noteButton, &QPushButton::clicked, this, &PresetManagerDialog::editNote);
+
+    m_iconButton = new QPushButton(QStringLiteral("图标…"), this);
+    m_iconButton->setObjectName(QStringLiteral("presetIconButton"));
+    m_iconButton->setStatusTip(QStringLiteral("给这个预设挑一个图标（本机设置，不进预设文件；"
+                                              "建快捷方式时会用它）"));
+    connect(m_iconButton, &QPushButton::clicked, this, &PresetManagerDialog::chooseIcon);
+
+    m_clearIconButton = new QPushButton(QStringLiteral("清除图标"), this);
+    m_clearIconButton->setObjectName(QStringLiteral("presetClearIconButton"));
+    connect(m_clearIconButton, &QPushButton::clicked, this, &PresetManagerDialog::clearIcon);
+
+    m_shortcutButton = new QPushButton(QStringLiteral("创建快捷方式…"), this);
+    m_shortcutButton->setObjectName(QStringLiteral("presetShortcutButton"));
+    m_shortcutButton->setStatusTip(
+            QStringLiteral("挑一个目录，在里面建一个「双击就用这个预设打开」的快捷方式"));
+    connect(m_shortcutButton, &QPushButton::clicked, this, &PresetManagerDialog::createShortcut);
+
     m_removeButton = new QPushButton(QStringLiteral("删除"), this);
     m_removeButton->setObjectName(QStringLiteral("presetRemoveButton"));
     connect(m_removeButton, &QPushButton::clicked, this, &PresetManagerDialog::removeSelected);
-
-    m_shortcutButton = new QPushButton(QStringLiteral("创建快捷方式"), this);
-    m_shortcutButton->setObjectName(QStringLiteral("presetShortcutButton"));
-    m_shortcutButton->setStatusTip(
-            QStringLiteral("在桌面建一个快捷方式，双击它就用这个预设打开 BatchSmith"));
-    m_shortcutButton->setToolTip(
-            QStringLiteral("在桌面建一个快捷方式，双击它就用这个预设打开 BatchSmith"));
-    connect(m_shortcutButton, &QPushButton::clicked, this, &PresetManagerDialog::createShortcut);
 
     auto* revealButton = new QPushButton(QStringLiteral("打开预设文件夹"), this);
     revealButton->setObjectName(QStringLiteral("presetRevealButton"));
@@ -82,22 +107,31 @@ PresetManagerDialog::PresetManagerDialog(QWidget* parent) : QDialog(parent) {
     closeButton->setObjectName(QStringLiteral("presetCloseButton"));
     connect(closeButton, &QPushButton::clicked, this, &QDialog::reject);
 
-    auto* buttonLayout = new QHBoxLayout;
-    buttonLayout->setContentsMargins(0, 0, 0, 0);
-    buttonLayout->addWidget(m_openButton);
-    buttonLayout->addWidget(m_renameButton);
-    buttonLayout->addWidget(m_shortcutButton);
-    buttonLayout->addWidget(m_removeButton);
-    buttonLayout->addStretch();
-    buttonLayout->addWidget(revealButton);
-    buttonLayout->addWidget(closeButton);
+    // 两行：上一行都是"改这个预设自己"，下一行是"拿它去做点别的 / 离开"
+    auto* editLayout = new QHBoxLayout;
+    editLayout->setContentsMargins(0, 0, 0, 0);
+    editLayout->addWidget(m_openButton);
+    editLayout->addWidget(m_renameButton);
+    editLayout->addWidget(m_noteButton);
+    editLayout->addWidget(m_iconButton);
+    editLayout->addWidget(m_clearIconButton);
+    editLayout->addWidget(m_removeButton);
+    editLayout->addStretch();
+
+    auto* actionLayout = new QHBoxLayout;
+    actionLayout->setContentsMargins(0, 0, 0, 0);
+    actionLayout->addWidget(m_shortcutButton);
+    actionLayout->addStretch();
+    actionLayout->addWidget(revealButton);
+    actionLayout->addWidget(closeButton);
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(12, 12, 12, 12);
     layout->setSpacing(8);
     layout->addWidget(m_tree, 1);
     layout->addWidget(m_statusLabel);
-    layout->addLayout(buttonLayout);
+    layout->addLayout(editLayout);
+    layout->addLayout(actionLayout);
 
     reload();
 }
@@ -132,19 +166,54 @@ void PresetManagerDialog::addRow(const QString& path) {
 
     const auto loaded = load_preset(path);
     if (loaded.ok()) {
-        item->setText(0, loaded.preset.name);
-        item->setText(1, QString::number(loaded.preset.lists.size()));
+        item->setText(ColumnPreset, loaded.preset.name);
+        item->setText(ColumnLists, QString::number(loaded.preset.lists.size()));
+        // 输出表达式是"这个预设到底会做什么"最直接的答案，直接摊在一列里；
+        // 空模板给「（空）」而不是留白，免得看起来像读失败了
+        item->setText(ColumnTemplate,
+                      loaded.preset.template_text.isEmpty() ? QStringLiteral("（空）")
+                                                            : loaded.preset.template_text);
+        item->setToolTip(ColumnTemplate, loaded.preset.template_text);
+        item->setText(ColumnNote,
+                      loaded.preset.note.isEmpty() ? QStringLiteral("—") : loaded.preset.note);
+        item->setToolTip(ColumnNote, loaded.preset.note);
     } else {
         // 读不动的预设也要显示出来 —— 否则用户只会在"打开预设"里撞墙，
         // 却不知道是哪个文件坏了，也删不掉它
-        item->setText(0, QStringLiteral("（读不了）"));
-        item->setText(1, QStringLiteral("—"));
-        item->setForeground(0, QBrush(QColor(0xc0, 0x39, 0x2b)));
-        item->setToolTip(0, loaded.error);
+        const QString unreadable = QStringLiteral("（读不了）");
+        for (int column = ColumnLists; column <= ColumnNote; ++column) {
+            item->setText(column, QStringLiteral("—"));
+        }
+        item->setText(ColumnPreset, unreadable);
+        item->setForeground(ColumnPreset, QBrush(QColor(0xc0, 0x39, 0x2b)));
+        item->setToolTip(ColumnPreset, loaded.error);
+        item->setToolTip(ColumnLists, loaded.error);
     }
-    item->setText(2, info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")));
-    item->setText(3, info.fileName());
-    item->setToolTip(3, QDir::toNativeSeparators(path));
+
+    // 自定义图标（本机设置）直接画在名字旁边 —— 与文件管理器里看图标是一个意思
+    const QString icon_path = load_local_settings(path).shortcut_icon;
+    if (!icon_path.isEmpty() && QFileInfo::exists(icon_path)) {
+        item->setIcon(ColumnPreset, QIcon(icon_path));
+        item->setToolTip(
+                ColumnPreset,
+                QStringLiteral("%1\n图标：%2")
+                        .arg(item->text(ColumnPreset), QDir::toNativeSeparators(icon_path)));
+    } else if (!icon_path.isEmpty()) {
+        // 图标文件被删了/挪走了：不静默当作没设过 —— 用户会以为"我明明设过"
+        item->setToolTip(
+                ColumnPreset,
+                QStringLiteral("%1\n图标已经不在了：%2")
+                        .arg(item->text(ColumnPreset), QDir::toNativeSeparators(icon_path)));
+    }
+
+    item->setText(ColumnModified, info.lastModified().toString(QStringLiteral("yyyy-MM-dd HH:mm")));
+    item->setText(ColumnFile, info.fileName());
+    item->setToolTip(ColumnFile, QDir::toNativeSeparators(path));
+}
+
+QString PresetManagerDialog::singleSelectedPath() const {
+    const QStringList paths = selectedPaths();
+    return paths.size() == 1 ? paths.first() : QString();
 }
 
 QStringList PresetManagerDialog::selectedPaths() const {
@@ -162,8 +231,18 @@ void PresetManagerDialog::updateButtons() {
     const bool one = paths.size() == 1;
     m_openButton->setEnabled(one);
     m_renameButton->setEnabled(one);
+    m_noteButton->setEnabled(one);
+    m_iconButton->setEnabled(one);
     m_shortcutButton->setEnabled(one);
     m_removeButton->setEnabled(!paths.isEmpty());
+
+    // 「清除图标」只在**确实设过**图标时可用 —— 与其它按钮一样，
+    // 不给一个点了没反应的按钮
+    bool has_icon = false;
+    if (one) {
+        has_icon = !load_local_settings(paths.first()).shortcut_icon.isEmpty();
+    }
+    m_clearIconButton->setEnabled(has_icon);
 }
 
 void PresetManagerDialog::openSelected() {
@@ -286,13 +365,30 @@ void PresetManagerDialog::removeSelected() {
 }
 
 void PresetManagerDialog::createShortcut() {
-    const QStringList paths = selectedPaths();
-    if (paths.size() != 1) {
+    const QString preset_path = singleSelectedPath();
+    if (preset_path.isEmpty()) {
         return;
     }
 
+    // 建到哪由用户挑。默认落在桌面 —— 那是"双击"这个动作最自然的地方，
+    // 但**不替他决定**：快捷方式经常是要放到某个项目文件夹、启动器目录里的。
+    // 测试会先把 m_shortcutDirectory 设好，于是这里不弹框。
+    QString directory = m_shortcutDirectory;
+    if (directory.isEmpty()) {
+        directory = QFileDialog::getExistingDirectory(
+                this, QStringLiteral("快捷方式放到哪"), default_shortcut_directory());
+        if (directory.isEmpty()) {
+            return;  // 用户取消
+        }
+    }
+
+    // 图标是可选的：设过就用它，没设过就用程序自带图标
+    const ShortcutRequest request(preset_path,
+                                  directory,
+                                  batchsmith::core::load_local_settings(preset_path).shortcut_icon);
+
     QString error;
-    const QString created = create_preset_shortcut(paths.first(), m_shortcutDirectory, &error);
+    const QString created = create_preset_shortcut(request, &error);
     if (created.isEmpty()) {
         QMessageBox::warning(this, QStringLiteral("创建快捷方式"), error);
         return;
@@ -305,8 +401,134 @@ void PresetManagerDialog::createShortcut() {
             QStringLiteral("已创建快捷方式：%1\n双击它就会用「%2」这个预设打开 BatchSmith。"
                            "以后改预设内容不用重建快捷方式 —— 它指向的是预设文件本身。")
                     .arg(QDir::toNativeSeparators(created),
-                         QFileInfo(paths.first()).completeBaseName()));
+                         QFileInfo(preset_path).completeBaseName()));
     m_statusLabel->setToolTip(QDir::toNativeSeparators(QFileInfo(created).absolutePath()));
+}
+
+bool PresetManagerDialog::updatePresetFile(
+        const QString& path,
+        const std::function<void(batchsmith::core::Preset&)>& change,
+        QString* error) {
+    const auto loaded = load_preset(path);
+    if (!loaded.ok()) {
+        if (error != nullptr) {
+            *error = loaded.error;
+        }
+        QMessageBox::warning(this,
+                             QStringLiteral("管理预设"),
+                             QStringLiteral("这个文件读不了，不能改：\n%1").arg(loaded.error));
+        return false;
+    }
+
+    batchsmith::core::Preset preset = loaded.preset;
+    preset.file_path.clear();
+    change(preset);
+
+    QString save_error;
+    if (!batchsmith::core::save_preset(preset, path, &save_error)) {
+        if (error != nullptr) {
+            *error = save_error;
+        }
+        QMessageBox::warning(this, QStringLiteral("管理预设"), save_error);
+        return false;
+    }
+    reload();
+    return true;
+}
+
+bool PresetManagerDialog::setNote(const QString& preset_path, const QString& note, QString* error) {
+    return updatePresetFile(
+            preset_path, [&note](batchsmith::core::Preset& preset) { preset.note = note; }, error);
+}
+
+bool PresetManagerDialog::setShortcutIcon(const QString& preset_path,
+                                          const QString& icon_path,
+                                          QString* error) {
+    // 先读回来再整体写回：`.local.toml` 里还有槽位绑定，只写图标那一节会把它抹掉
+    batchsmith::core::LocalSettings settings = batchsmith::core::load_local_settings(preset_path);
+    settings.shortcut_icon = icon_path;
+
+    QString save_error;
+    if (!batchsmith::core::save_local_settings(settings, preset_path, &save_error)) {
+        if (error != nullptr) {
+            *error = save_error;
+        }
+        QMessageBox::warning(this, QStringLiteral("管理预设"), save_error);
+        return false;
+    }
+    reload();
+    return true;
+}
+
+void PresetManagerDialog::editNote() {
+    const QString path = singleSelectedPath();
+    if (path.isEmpty()) {
+        return;
+    }
+
+    const auto loaded = load_preset(path);
+    if (!loaded.ok()) {
+        return;  // updatePresetFile 会给出可读的报错
+    }
+
+    bool accepted = false;
+    const QString note = QInputDialog::getMultiLineText(this,
+                                                        QStringLiteral("备注"),
+                                                        QStringLiteral("给「%1」写一句备注："
+                                                                       "（跟着预设文件走，"
+                                                                       "分享时会一起带过去）")
+                                                                .arg(loaded.preset.name),
+                                                        loaded.preset.note,
+                                                        &accepted);
+    if (!accepted) {
+        return;
+    }
+    if (setNote(path, note, nullptr)) {
+        m_statusLabel->setText(note.isEmpty() ? QStringLiteral("已清除备注")
+                                              : QStringLiteral("已记下备注：%1").arg(note));
+    }
+}
+
+void PresetManagerDialog::chooseIcon() {
+    const QString path = singleSelectedPath();
+    if (path.isEmpty()) {
+        return;
+    }
+
+    // 图标是**本机路径**，存进 `.local.toml`（与槽位绑定同一份文件）——
+    // 这样预设本身还能干净地发给别人
+    const QString current = batchsmith::core::load_local_settings(path).shortcut_icon;
+#if defined(Q_OS_WIN)
+    // Windows 上还能直接指一个 exe/dll —— 从里面挑图标是常见做法
+    const QString filter = QStringLiteral("图标或程序 (*.ico *.png *.bmp *.exe *.dll);;"
+                                          "所有文件 (*)");
+#else
+    const QString filter = QStringLiteral("图标 (*.png *.svg *.ico *.xpm);;所有文件 (*)");
+#endif
+    const QString icon =
+            QFileDialog::getOpenFileName(this,
+                                         QStringLiteral("挑一个图标"),
+                                         current.isEmpty() ? QDir::homePath() : current,
+                                         filter);
+    if (icon.isEmpty()) {
+        return;  // 用户取消
+    }
+
+    const QString absolute = QFileInfo(icon).absoluteFilePath();
+    if (setShortcutIcon(path, absolute, nullptr)) {
+        m_statusLabel->setText(QStringLiteral("已设置图标：%1（本机设置，不进预设文件）")
+                                       .arg(QDir::toNativeSeparators(absolute)));
+    }
+}
+
+void PresetManagerDialog::clearIcon() {
+    const QString path = singleSelectedPath();
+    if (path.isEmpty()) {
+        return;
+    }
+    if (setShortcutIcon(path, QString(), nullptr)) {
+        m_statusLabel->setText(QStringLiteral("已清除图标 —— 以后建的快捷方式用程序自带图标"));
+    }
 }
 
 void PresetManagerDialog::revealDirectory() {

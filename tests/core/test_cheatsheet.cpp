@@ -84,8 +84,8 @@ TEST_CASE("速查表：文档里的函数名与实际注册的一一对应") {
                   unknown.join(QStringLiteral("、")).toStdString());
 
     // 数量对不上时也要显式失败：这提醒改代码的人「文档也要一起看」
-    CHECK(registered.size() == 28);
-    CHECK(documented_set.size() == 28);
+    CHECK(registered.size() == 29);
+    CHECK(documented_set.size() == 29);
 }
 
 TEST_CASE("速查表：每条函数文档的字段都是完整的") {

@@ -310,6 +310,11 @@ QString preset_to_toml(const Preset& preset) {
     lines.append(QStringLiteral("name = %1").arg(toml_string(preset.name)));
     lines.append(QStringLiteral("version = %1").arg(preset.version));
     lines.append(QStringLiteral("level = %1").arg(toml_string(preset.level)));
+    // 备注只在非空时写出：空备注写一行 `note = ''` 只是噪音，
+    // 而"没写 note"与"note 是空串"在读侧是同一件事
+    if (!preset.note.isEmpty()) {
+        lines.append(QStringLiteral("note = %1").arg(toml_string(preset.note)));
+    }
     lines.append(QString());
 
     for (const PresetList& list : preset.lists) {
@@ -389,6 +394,12 @@ PresetLoad preset_from_toml(const QString& text, const QString& source_name) {
         return result;
     }
     if (!read_string(*preset_table, "level", &preset.level, &field_error)) {
+        result.error = QStringLiteral("[preset] %1").arg(field_error);
+        return result;
+    }
+    // 备注是可选字段（老预设里没有），但要校验类型：写成数组/表时应当报错，
+    // 而不是被静默当成空备注
+    if (!read_string(*preset_table, "note", &preset.note, &field_error)) {
         result.error = QStringLiteral("[preset] %1").arg(field_error);
         return result;
     }
@@ -719,27 +730,38 @@ PresetLoad load_preset(const QString& path) {
     return result;
 }
 
-bool save_bindings(const SlotBindings& bindings, const QString& preset_path, QString* error) {
+bool save_local_settings(const LocalSettings& settings,
+                         const QString& preset_path,
+                         QString* error) {
     QStringList lines;
-    lines.append(QStringLiteral("# 本机绑定 —— 上面那个预设里的槽位在这台机器上指向哪里。"));
+    lines.append(QStringLiteral("# 本机设置 —— 上面那个预设在这台机器上的东西。"));
     lines.append(QStringLiteral("#"));
-    lines.append(QStringLiteral("# 这是**本机信息**，分享预设时请不要带这个文件。"));
+    lines.append(
+            QStringLiteral("# 这里全是**本机信息**（路径、图标），分享预设时请不要带这个文件。"));
     lines.append(QStringLiteral("# 删掉它不会损坏预设，只是下次加载时需要重新绑定路径。"));
     lines.append(QString());
     lines.append(QStringLiteral("[bindings]"));
 
-    // 排序输出：同一份绑定每次写出的文件都一样，便于 diff 与版本控制
-    QStringList keys = bindings.keys();
+    // 排序输出：同一份设置每次写出的文件都一样，便于 diff 与版本控制
+    QStringList keys = settings.bindings.keys();
     keys.sort();
     for (const QString& key : keys) {
-        lines.append(QStringLiteral("%1 = %2").arg(key, toml_string(bindings.value(key))));
+        lines.append(QStringLiteral("%1 = %2").arg(key, toml_string(settings.bindings.value(key))));
+    }
+
+    if (!settings.shortcut_icon.isEmpty()) {
+        lines.append(QString());
+        lines.append(
+                QStringLiteral("# 「创建快捷方式」时给快捷方式用的图标（不设就用程序自带图标）"));
+        lines.append(QStringLiteral("[shortcut]"));
+        lines.append(QStringLiteral("icon = %1").arg(toml_string(settings.shortcut_icon)));
     }
     lines.append(QString());
 
     QFile file(bindings_path_for(preset_path));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         if (error != nullptr) {
-            *error = QStringLiteral("写不了绑定文件：%1（%2）")
+            *error = QStringLiteral("写不了本机设置文件：%1（%2）")
                              .arg(QDir::toNativeSeparators(file.fileName()), file.errorString());
         }
         return false;
@@ -747,7 +769,7 @@ bool save_bindings(const SlotBindings& bindings, const QString& preset_path, QSt
     const QByteArray bytes = lines.join(QLatin1Char('\n')).toUtf8();
     if (file.write(bytes) != bytes.size()) {
         if (error != nullptr) {
-            *error = QStringLiteral("绑定文件写入不完整：%1").arg(file.fileName());
+            *error = QStringLiteral("本机设置文件写入不完整：%1").arg(file.fileName());
         }
         return false;
     }
@@ -755,12 +777,12 @@ bool save_bindings(const SlotBindings& bindings, const QString& preset_path, QSt
     return true;
 }
 
-SlotBindings load_bindings(const QString& preset_path, QString* error) {
-    SlotBindings bindings;
+LocalSettings load_local_settings(const QString& preset_path, QString* error) {
+    LocalSettings settings;
 
     const QString path = bindings_path_for(preset_path);
     if (!QFileInfo::exists(path)) {
-        return bindings;  // 还没绑过，不算错
+        return settings;  // 还没绑过，不算错
     }
 
     QString text;
@@ -769,7 +791,7 @@ SlotBindings load_bindings(const QString& preset_path, QString* error) {
         if (error != nullptr) {
             *error = read_error;
         }
-        return bindings;
+        return settings;
     }
 
     toml::table root;
@@ -779,31 +801,51 @@ SlotBindings load_bindings(const QString& preset_path, QString* error) {
         root = toml::parse(text_utf8, path_utf8);
     } catch (const toml::parse_error& parse_error) {
         if (error != nullptr) {
-            *error = QStringLiteral("绑定文件不是合法的 TOML：%1（%2）")
+            *error = QStringLiteral("本机设置文件不是合法的 TOML：%1（%2）")
                              .arg(QString::fromStdString(std::string(parse_error.description())),
                                   QDir::toNativeSeparators(path));
         }
-        return bindings;
+        return settings;
     }
 
-    const toml::table* table = root["bindings"].as_table();
-    if (table == nullptr) {
-        return bindings;
+    if (const toml::table* table = root["bindings"].as_table()) {
+        for (const auto& [key, value] : *table) {
+            const std::string key_utf8{key.str()};
+            const auto* text_value = value.as_string();
+            if (text_value == nullptr) {
+                if (error != nullptr) {
+                    *error = QStringLiteral("本机设置文件里的 %1 不是字符串")
+                                     .arg(QString::fromStdString(key_utf8));
+                }
+                return {};
+            }
+            settings.bindings.insert(QString::fromStdString(key_utf8),
+                                     QString::fromStdString(text_value->get()));
+        }
     }
-    for (const auto& [key, value] : *table) {
-        const std::string key_utf8{key.str()};
-        const auto* text_value = value.as_string();
-        if (text_value == nullptr) {
+
+    if (const toml::table* shortcut = root["shortcut"].as_table()) {
+        QString field_error;
+        if (!read_string(*shortcut, "icon", &settings.shortcut_icon, &field_error)) {
             if (error != nullptr) {
-                *error = QStringLiteral("绑定文件里的 %1 不是字符串")
-                                 .arg(QString::fromStdString(key_utf8));
+                *error = QStringLiteral("[shortcut] %1").arg(field_error);
             }
             return {};
         }
-        bindings.insert(QString::fromStdString(key_utf8),
-                        QString::fromStdString(text_value->get()));
     }
-    return bindings;
+    return settings;
+}
+
+bool save_bindings(const SlotBindings& bindings, const QString& preset_path, QString* error) {
+    // 先读回已有的本机设置，只换掉绑定那一节 —— 直接拿一份"只有绑定"的结构去覆盖
+    // 整个文件，会把图标设置抹掉，而用户完全不会把这两件事联系起来
+    LocalSettings settings = load_local_settings(preset_path);
+    settings.bindings = bindings;
+    return save_local_settings(settings, preset_path, error);
+}
+
+SlotBindings load_bindings(const QString& preset_path, QString* error) {
+    return load_local_settings(preset_path, error).bindings;
 }
 
 // ---------------------------------------------------------------------------

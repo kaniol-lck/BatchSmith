@@ -110,8 +110,8 @@ QList<HelperDoc> helper_docs() {
              QStringLiteral("设定随机种子，让预览与实际执行一致")},
             {QStringLiteral("生成"),
              {QStringLiteral("regex")},
-             QStringLiteral("regex(s, pattern)"),
-             QStringLiteral("正则捕获列表：有捕获组给各组，无则给整个匹配")},
+             QStringLiteral("regex(s, pattern[, n])"),
+             QStringLiteral("正则捕获列表：有捕获组给各组，无则给整个匹配；给了 n 直接取第 n 项")},
 
             // ---- 文本 ----
             {QStringLiteral("文本"),
@@ -128,8 +128,12 @@ QList<HelperDoc> helper_docs() {
              QStringLiteral("去掉首尾空白")},
             {QStringLiteral("文本"),
              {QStringLiteral("replace")},
-             QStringLiteral("replace(s, pattern, to)"),
-             QStringLiteral("正则全局替换")},
+             QStringLiteral("replace(s, find, to)"),
+             QStringLiteral("**按字面**全局替换（不认正则；要正则用 resub）")},
+            {QStringLiteral("文本"),
+             {QStringLiteral("resub")},
+             QStringLiteral("resub(s, pattern, to)"),
+             QStringLiteral("正则全局替换，可用 \\1…\\9 引用捕获组")},
             {QStringLiteral("文本"),
              {QStringLiteral("match")},
              QStringLiteral("match(s, pattern)"),
@@ -325,6 +329,27 @@ QList<CheatExample> cheat_examples() {
              {QStringLiteral("2026")}},
 
             {kGroupHelper,
+             QStringLiteral("正则直接取第 n 项：省掉下标，越界给空串"),
+             QStringLiteral(R"dsl($regex("番剧 第07话", [[第(\d+)话]], 1)$)dsl"),
+             none,
+             none,
+             {QStringLiteral("07")}},
+
+            {kGroupHelper,
+             QStringLiteral("字面替换（不认正则）：`.` 就是点本身"),
+             QStringLiteral(R"dsl($replace("2026.09.15", ".", "-")$)dsl"),
+             none,
+             none,
+             {QStringLiteral("2026-09-15")}},
+
+            {kGroupHelper,
+             QStringLiteral("正则替换：可用 \\1 引用捕获组"),
+             QStringLiteral(R"dsl($resub("番剧 第07话", [[第(\d+)话]], [[第\1话 正片]])$)dsl"),
+             none,
+             none,
+             {QStringLiteral("番剧 第07话 正片")}},
+
+            {kGroupHelper,
              QStringLiteral("取文件名主干（扩展名去掉）"),
              QStringLiteral(R"dsl($stem(basename("D:/in/IMG_0001.jpeg"))$)dsl"),
              none,
@@ -355,11 +380,11 @@ QList<CheatExample> cheat_examples() {
              {QStringLiteral("abc")}},
 
             {kGroupHelper,
-             QStringLiteral("替换（正则）"),
-             QStringLiteral(R"dsl($replace("a-b-c", "-", "+")$)dsl"),
+             QStringLiteral("删掉一段固定文本（字面替换成空串，全部出现）"),
+             QStringLiteral(R"dsl($replace("a_final_final.txt", "_final", "")$)dsl"),
              none,
              none,
-             {QStringLiteral("a+b+c")}},
+             {QStringLiteral("a.txt")}},
 
             {kGroupHelper,
              QStringLiteral("随机：固定种子下每次预览都一样，不会「预览与执行不同」"),
@@ -587,11 +612,20 @@ QString cheatsheet_text() {
     lines.append(QStringLiteral("        那个带勾）；也可以用「文件 → 打开预设(Ctrl+O)」。"));
     lines.append(
             QStringLiteral("      · 想让某套预设「双击即用」：在「预设 → 管理预设」里选中它，点"));
-    lines.append(QStringLiteral(
-            "        「创建快捷方式」，桌面就会出现一个带着 --preset 参数的快捷方式。"));
+    lines.append(
+            QStringLiteral("        「创建快捷方式…」，挑一个目录即可（那里也能给它挑个图标）。"));
     lines.append(QStringLiteral("      · 启动时直接带上预设也可以："));
     lines.append(QStringLiteral("          batchsmith 我的预设.toml"));
     lines.append(QStringLiteral("          batchsmith --preset \"我的预设.toml\""));
+    lines.append(QString());
+    lines.append(QStringLiteral(
+            "    · 备注：预设里可以写一行 note = '...'（「管理预设 → 备注…」改的就是"));
+    lines.append(QStringLiteral("      它）。它是给人看的一句话，会跟着预设一起分享出去。"));
+    lines.append(QStringLiteral(
+            "    · 图标：管理预设里能给预设挑一个图标，建快捷方式时用它。图标是「本机"));
+    lines.append(QStringLiteral(
+            "      路径」，所以写在旁边的 .local.toml 里、不进预设文件 —— 预设照样"));
+    lines.append(QStringLiteral("      可以干净地发给别人。"));
     lines.append(QString());
     lines.append(QStringLiteral("    · 预设里不存绝对路径：绑定的文件夹写成槽位 ${input}，"));
     lines.append(QStringLiteral("      本机实际路径存在旁边的 <预设名>.local.toml 里。"));
@@ -609,6 +643,8 @@ QString cheatsheet_text() {
     lines.append(QStringLiteral("        [preset]"));
     lines.append(QStringLiteral("        name = '番剧重命名'"));
     lines.append(QStringLiteral("        version = 1"));
+    lines.append(
+            QStringLiteral("        note = '只留 mkv'          # 可省（管理预设里的「备注…」）"));
     lines.append(QString());
     lines.append(QStringLiteral("        [[lists]]"));
     lines.append(QStringLiteral("        id = 'list1'"));

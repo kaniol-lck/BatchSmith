@@ -12,12 +12,14 @@
 #include <QAction>
 #include <QApplication>
 #include <QCheckBox>
+#include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
 #include <QDialog>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
@@ -346,8 +348,8 @@ TEST_CASE("预设：管理对话框列出预设目录里的文件，坏文件也
     QStringList tooltips;
     for (int row = 0; row < dialog.tree()->topLevelItemCount(); ++row) {
         const QTreeWidgetItem* item = dialog.tree()->topLevelItem(row);
-        names.append(item->text(0));
-        tooltips.append(item->toolTip(0));
+        names.append(item->text(PresetManagerDialog::ColumnPreset));
+        tooltips.append(item->toolTip(PresetManagerDialog::ColumnPreset));
     }
     CHECK(names.contains(S(u"甲预设")));
     // 坏文件也要列出来 —— 否则用户在"打开预设"里撞墙却找不到是哪个文件
@@ -356,7 +358,10 @@ TEST_CASE("预设：管理对话框列出预设目录里的文件，坏文件也
 
     // 绑定文件不是预设，不该出现
     for (int row = 0; row < dialog.tree()->topLevelItemCount(); ++row) {
-        CHECK_FALSE(dialog.tree()->topLevelItem(row)->text(3).endsWith(S(u".local.toml")));
+        CHECK_FALSE(dialog.tree()
+                            ->topLevelItem(row)
+                            ->text(PresetManagerDialog::ColumnFile)
+                            .endsWith(S(u".local.toml")));
     }
 
     QFile::remove(good);
@@ -388,7 +393,7 @@ TEST_CASE("预设：管理对话框选中一个才能打开，重命名与删除
     QTreeWidgetItem* target = nullptr;
     for (int row = 0; row < dialog.tree()->topLevelItemCount(); ++row) {
         QTreeWidgetItem* item = dialog.tree()->topLevelItem(row);
-        if (item->text(3) == S(u"可选中.toml")) {
+        if (item->text(PresetManagerDialog::ColumnFile) == S(u"可选中.toml")) {
             target = item;
             break;
         }
@@ -594,6 +599,97 @@ TEST_CASE("预设：保存不问路径，直接落进预设目录") {
     }
 }
 
+TEST_CASE("预设：管理对话框显示输出表达式与备注；备注进预设文件、图标只进本机设置") {
+    const QString directory = batchsmith::core::default_preset_directory();
+    REQUIRE(batchsmith::core::ensure_preset_directory());
+
+    QTemporaryDir assets;
+    REQUIRE(assets.isValid());
+
+    const QString path = QDir(directory).filePath(S(u"表达式与备注.toml"));
+    {
+        QFile file(path);
+        REQUIRE(file.open(QIODevice::WriteOnly));
+        file.write("[preset]\nname = '表达式与备注'\nversion = 1\n\n"
+                   "[[lists]]\nid = 'list1'\nitems = ['a']\n\n"
+                   "[output]\ntemplate = 'mv $list1[i]$ 正片'\n");
+        file.close();
+    }
+
+    // 一个**真的**图片文件：`QIcon` 只认得出真图片，随便塞几个字节进去的话
+    // `setIcon` 拿到的是空图标，界面上什么都看不到（测试也就测不出东西）
+    const QString icon = QDir(assets.path()).filePath(S(u"番剧.png"));
+    {
+        QImage image(16, 16, QImage::Format_ARGB32);
+        image.fill(QColor(0x30, 0x80, 0xc0));
+        REQUIRE(image.save(icon));
+    }
+
+    PresetManagerDialog dialog;
+    dialog.reload();
+
+    // 按文件列找那一行；每次改动后对话框会重建列表，所以行指针不能留着用
+    const auto find_row = [&dialog, &path]() -> QTreeWidgetItem* {
+        for (int row = 0; row < dialog.tree()->topLevelItemCount(); ++row) {
+            QTreeWidgetItem* item = dialog.tree()->topLevelItem(row);
+            if (item->data(PresetManagerDialog::ColumnPreset, Qt::UserRole).toString() == path) {
+                return item;
+            }
+        }
+        return nullptr;
+    };
+
+    QTreeWidgetItem* row = find_row();
+    REQUIRE(row != nullptr);
+    // 输出表达式直接摊在一列里 —— "这个预设到底会做什么"最直接的答案
+    CHECK(row->text(PresetManagerDialog::ColumnTemplate) == S(u"mv $list1[i]$ 正片"));
+    CHECK(row->text(PresetManagerDialog::ColumnNote) == S(u"—"));  // 还没写备注
+
+    // ---- 备注：写进预设文件 ----
+    QString error;
+    REQUIRE(dialog.setNote(path, S(u"给番剧用，只留 mkv"), &error));
+    CHECK(error.isEmpty());
+    CHECK(load_preset(path).preset.note == S(u"给番剧用，只留 mkv"));
+
+    row = find_row();
+    REQUIRE(row != nullptr);
+    CHECK(row->text(PresetManagerDialog::ColumnNote) == S(u"给番剧用，只留 mkv"));
+    CHECK(row->toolTip(PresetManagerDialog::ColumnNote) == S(u"给番剧用，只留 mkv"));
+
+    // 备注在预设文件里 —— 它会跟着预设一起分享出去（这是刻意的）
+    QFile preset_file(path);
+    REQUIRE(preset_file.open(QIODevice::ReadOnly));
+    CHECK(QString::fromUtf8(preset_file.readAll()).contains(S(u"给番剧用，只留 mkv")));
+    preset_file.close();
+
+    // ---- 图标：进本机设置，**不进**预设文件 ----
+    CHECK_FALSE(dialog.clearIconButton()->isEnabled());  // 还没设过
+    REQUIRE(dialog.setShortcutIcon(path, icon, &error));
+    CHECK(batchsmith::core::load_local_settings(path).shortcut_icon == icon);
+
+    preset_file.open(QIODevice::ReadOnly);
+    // 图标是本机路径：预设文件里**不该**出现它，否则"发给别人"就带上了本机信息
+    CHECK_FALSE(QString::fromUtf8(preset_file.readAll()).contains(icon));
+    preset_file.close();
+
+    row = find_row();
+    REQUIRE(row != nullptr);
+    CHECK_FALSE(row->icon(PresetManagerDialog::ColumnPreset).isNull());  // 名字旁边画出来了
+
+    dialog.tree()->clearSelection();
+    row = find_row();
+    REQUIRE(row != nullptr);
+    row->setSelected(true);
+    CHECK(dialog.clearIconButton()->isEnabled());
+
+    // ---- 清除图标：本机设置里没了，绑定之类不受影响 ----
+    REQUIRE(dialog.setShortcutIcon(path, QString(), &error));
+    CHECK(batchsmith::core::load_local_settings(path).shortcut_icon.isEmpty());
+
+    QFile::remove(path);
+    QFile::remove(batchsmith::core::bindings_path_for(path));
+}
+
 TEST_CASE("预设：管理对话框能给预设建快捷方式（建到指定目录）") {
     const QString directory = batchsmith::core::default_preset_directory();
     REQUIRE(batchsmith::core::ensure_preset_directory());
@@ -614,13 +710,25 @@ TEST_CASE("预设：管理对话框能给预设建快捷方式（建到指定目
     dialog.setShortcutDirectory(shortcutDir.path());
     dialog.reload();
 
+    // 先设一个图标：它应当被带到快捷方式上
+    QTemporaryDir assets;
+    REQUIRE(assets.isValid());
+    const QString icon = QDir(assets.path()).filePath(S(u"icon.png"));
+    {
+        QImage image(16, 16, QImage::Format_ARGB32);
+        image.fill(QColor(0x30, 0x80, 0xc0));
+        REQUIRE(image.save(icon));
+    }
+    QString icon_error;
+    REQUIRE(dialog.setShortcutIcon(path, icon, &icon_error));
+
     // 没选中时不能建（与打开 / 重命名一致）
     CHECK_FALSE(dialog.shortcutButton()->isEnabled());
 
     QTreeWidgetItem* target = nullptr;
     for (int row = 0; row < dialog.tree()->topLevelItemCount(); ++row) {
         QTreeWidgetItem* item = dialog.tree()->topLevelItem(row);
-        if (item->text(3) == S(u"建快捷方式.toml")) {
+        if (item->text(PresetManagerDialog::ColumnFile) == S(u"建快捷方式.toml")) {
             target = item;
             break;
         }
@@ -642,6 +750,10 @@ TEST_CASE("预设：管理对话框能给预设建快捷方式（建到指定目
                     error.toStdString());
     CHECK(shortcut.program == QCoreApplication::applicationFilePath());
     CHECK(shortcut.preset_path() == QFileInfo(path).absoluteFilePath());
+#if !defined(Q_OS_MACOS)
+    // 预设设了图标，建的快捷方式就该用它（macOS 的 .command 没有图标位置）
+    CHECK(shortcut.icon == icon);
+#endif
 
     // 成功**不弹框**（连着建几个时不该每建一个点一次"确定"），结果写在状态行里
     CHECK(dialog.statusLabel()->text().contains(created.first().fileName()));

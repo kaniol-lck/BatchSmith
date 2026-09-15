@@ -29,7 +29,9 @@ using batchsmith::core::ListSource;
 using batchsmith::core::ListSourceKind;
 using batchsmith::core::ListSourceList;
 using batchsmith::core::load_bindings;
+using batchsmith::core::load_local_settings;
 using batchsmith::core::load_preset;
+using batchsmith::core::LocalSettings;
 using batchsmith::core::Preset;
 using batchsmith::core::preset_from_sources;
 using batchsmith::core::preset_from_toml;
@@ -38,6 +40,7 @@ using batchsmith::core::preset_sources;
 using batchsmith::core::preset_to_toml;
 using batchsmith::core::PresetList;
 using batchsmith::core::save_bindings;
+using batchsmith::core::save_local_settings;
 using batchsmith::core::save_preset;
 using batchsmith::core::SlotBindings;
 using batchsmith::core::slots_in;
@@ -721,4 +724,90 @@ TEST_CASE("文件名：后缀是调用方给的，同一套逻辑给快捷方式
     CHECK(unique_file_path(dir.path(), S(u"番剧"), S(u".lnk")) == base.filePath(S(u"番剧.lnk")));
     CHECK(unique_file_path(dir.path(), S(u"番剧"), S(u".desktop"), S(u"BatchSmith")) ==
           base.filePath(S(u"番剧.desktop")));
+}
+
+// ===========================================================================
+// 备注与本机设置
+// ===========================================================================
+
+TEST_CASE("备注：能往返；空备注不写进文件；类型不对要报错") {
+    Preset preset;
+    preset.name = S(u"甲");
+    preset.template_text = S(u"$list1[i]$");
+    preset.note = S(u"只留 mkv，给番剧用的");
+
+    const auto back = preset_from_toml(preset_to_toml(preset));
+    REQUIRE(back.ok());
+    CHECK(back.preset.note == S(u"只留 mkv，给番剧用的"));
+
+    // 备注里可能出现换行与引号（用户随手写的），两种字符串形态都得能往返
+    preset.note = S(u"第一行\n第二行，带个 ' 引号");
+    const auto tricky = preset_from_toml(preset_to_toml(preset));
+    REQUIRE(tricky.ok());
+    CHECK(tricky.preset.note == preset.note);
+
+    // 空备注不写一行 `note = ''` —— 与"没写"是同一件事，留一行空字段只是噪音
+    preset.note.clear();
+    const QString text = preset_to_toml(preset);
+    CHECK_FALSE(text.contains(S(u"note")));
+    CHECK(preset_from_toml(text).ok());
+
+    // 老预设（没有这个字段）照常读得动
+    const auto older =
+            preset_from_toml(S(u"[preset]\nname='x'\nversion=1\n\n[output]\ntemplate='a'\n"));
+    REQUIRE(older.ok());
+    CHECK(older.preset.note.isEmpty());
+
+    // note 写成数字要报错，而不是静默当成空备注（"看起来加载成功了，实际少了半截"）
+    const auto bad = preset_from_toml(S(u"[preset]\nname='x'\nversion=1\nnote=1\n"));
+    CHECK_FALSE(bad.ok());
+    CHECK(bad.error.contains(S(u"note")));
+}
+
+TEST_CASE("本机设置：槽位绑定与快捷方式图标在同一个文件里，互不覆盖") {
+    QTemporaryDir dir;
+    REQUIRE(dir.isValid());
+    const QString path = QDir(dir.path()).filePath(S(u"p.toml"));
+    QString error;
+
+    SlotBindings bindings;
+    bindings.insert(S(u"input"), S(u"D:/anime"));
+    REQUIRE(save_bindings(bindings, path, &error));
+
+    // 加图标时绑定必须还在
+    LocalSettings settings = load_local_settings(path);
+    CHECK(settings.bindings.value(S(u"input")) == S(u"D:/anime"));
+    settings.shortcut_icon = S(u"D:/icons/anime.ico");
+    REQUIRE(save_local_settings(settings, path, &error));
+
+    const LocalSettings back = load_local_settings(path);
+    CHECK(back.bindings.value(S(u"input")) == S(u"D:/anime"));
+    CHECK(back.shortcut_icon == S(u"D:/icons/anime.ico"));
+
+    // 反过来：**再写一次绑定不能把图标抹掉**（这正是分成两套 API 会踩的坑）
+    SlotBindings more = bindings;
+    more.insert(S(u"input2"), S(u"D:/sub"));
+    REQUIRE(save_bindings(more, path, &error));
+    CHECK(load_local_settings(path).shortcut_icon == S(u"D:/icons/anime.ico"));
+    CHECK(load_local_settings(path).bindings.value(S(u"input2")) == S(u"D:/sub"));
+
+    // 清掉图标，绑定照旧
+    LocalSettings cleared = load_local_settings(path);
+    cleared.shortcut_icon.clear();
+    REQUIRE(save_local_settings(cleared, path, &error));
+    CHECK(load_local_settings(path).shortcut_icon.isEmpty());
+    CHECK(load_local_settings(path).bindings.value(S(u"input")) == S(u"D:/anime"));
+
+    // 只读绑定（旧调用点）看到的就是绑定那一节
+    CHECK(load_bindings(path, &error).value(S(u"input")) == S(u"D:/anime"));
+
+    // icon 写错类型要报错，而不是静默丢掉图标设置
+    {
+        QFile file(bindings_path_for(path));
+        REQUIRE(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("[bindings]\ninput = 'x'\n\n[shortcut]\nicon = 3\n");
+    }
+    error.clear();
+    CHECK(load_local_settings(path, &error).shortcut_icon.isEmpty());
+    CHECK(error.contains(S(u"icon")));
 }

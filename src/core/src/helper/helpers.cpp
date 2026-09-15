@@ -362,6 +362,10 @@ int helper_rand(lua_State* state) {
 }
 
 /// 正则：返回捕获列表。有捕获组 → 各组；无捕获组 → 整个匹配（单元素）；不匹配 → 空列表。
+///
+/// 第三个参数（可选）直接取列表里的第 n 项 —— 这是最常见的用法：
+/// `regex(名字, [[第(\d+)话]], 1)` 比 `regex(名字, [[第(\d+)话]])[1]` 少一层下标，
+/// 而且**越界一律空串**（与列表越界的约定一致），不会像取下标那样拿到 nil。
 int helper_regex(lua_State* state) {
     const QString subject = require_string(state, 1, "regex");
     const QString pattern = require_string(state, 2, "regex");
@@ -370,22 +374,27 @@ int helper_regex(lua_State* state) {
     if (!expression.isValid()) {
         luaL_error(state, "regex: 正则无效：%s", expression.errorString().toUtf8().constData());
     }
+
+    QStringList result;
     const QRegularExpressionMatch match = expression.match(subject);
-    if (!match.hasMatch()) {
-        push_list(state, {});
+    if (match.hasMatch()) {
+        const int captures = expression.captureCount();
+        if (captures <= 0) {
+            result.append(match.captured(0));
+        } else {
+            for (int i = 1; i <= captures; ++i) {
+                result.append(match.captured(i));
+            }
+        }
+    }
+
+    if (lua_gettop(state) < 3) {
+        push_list(state, result);
         return 1;
     }
 
-    QStringList result;
-    const int captures = expression.captureCount();
-    if (captures <= 0) {
-        result.append(match.captured(0));
-    } else {
-        for (int i = 1; i <= captures; ++i) {
-            result.append(match.captured(i));
-        }
-    }
-    push_list(state, result);
+    const qsizetype which = integer_arg(state, 3, "regex");
+    push_string(state, which >= 1 && which <= result.size() ? result.at(which - 1) : QString());
     return 1;
 }
 
@@ -422,14 +431,38 @@ int helper_trim(lua_State* state) {
     return 1;
 }
 
+/// 文本替换：**按字面**找 `find` 并全部换成 `to`。
+///
+/// 「字面」是刻意的，也是与正则版本的分工：批量改名时绝大多数要换的是普通子串
+/// （`第` → `第`、`_final` → ``），而 `.`、`(`、`[` 这些字符在正则里有特殊含义 ——
+/// 让 `replace` 认正则，等于要求用户每写一个字面串都要先想"这里面有没有元字符"。
+///
+/// ⚠️ 0.3.0 的 `replace` 是**正则**替换，这里改成了字面替换（正则版见 `resub`）。
+/// 老预设里 `replace(x, "a+", "b")` 的含义会从"一个或多个 a"变成"字面 a+"，
+/// 结果通常是不再匹配 —— 这是**破坏性变更**，见 CHANGELOG。
 int helper_replace(lua_State* state) {
     QString subject = require_string(state, 1, "replace");  // replace 会就地修改
-    const QString pattern = require_string(state, 2, "replace");
+    const QString find = require_string(state, 2, "replace");
     const QString replacement = require_string(state, 3, "replace");
+
+    if (find.isEmpty()) {
+        // 空串在字面替换里是"在每个位置插入"，Qt 会把每个字符之间都插一遍 ——
+        // 几乎不会是用户想要的，明确报错比给一个吓人的结果好
+        luaL_error(state, "replace: 要替换的文本不能为空（要按正则替换用 resub）");
+    }
+    push_string(state, subject.replace(find, replacement));  // 全局替换
+    return 1;
+}
+
+/// 正则替换：全局替换，`to` 里可用 `\1`…`\9` 引用捕获组。
+int helper_resub(lua_State* state) {
+    QString subject = require_string(state, 1, "resub");  // resub 会就地修改
+    const QString pattern = require_string(state, 2, "resub");
+    const QString replacement = require_string(state, 3, "resub");
 
     const QRegularExpression expression(pattern);
     if (!expression.isValid()) {
-        luaL_error(state, "replace: 正则无效");
+        luaL_error(state, "resub: 正则无效：%s", expression.errorString().toUtf8().constData());
     }
     push_string(state, subject.replace(expression, replacement));  // 全局替换
     return 1;
@@ -671,6 +704,7 @@ constexpr Helpers kHelpers[] = {
         {"lower", helper_lower},
         {"trim", helper_trim},
         {"replace", helper_replace},
+        {"resub", helper_resub},
         {"match", helper_match},
         {"pad", helper_pad},
         // 路径

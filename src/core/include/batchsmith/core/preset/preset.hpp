@@ -34,6 +34,10 @@ struct Preset {
     /// （技术方案 ADR-5：安全来自沙箱与两阶段执行，不来自把功能藏起来）。
     QString level = QStringLiteral("safe");
 
+    /// 备注：给人看的一句话（"这套是给番剧用的，过滤只留 mkv"）。
+    /// 属于预设本身（不是本机信息），所以**跟着预设文件走**、会一起分享出去。
+    QString note;
+
     QList<PresetList> lists;
     QString template_text;
 
@@ -129,11 +133,34 @@ struct PresetLoad {
 [[nodiscard]] bool save_preset(const Preset& preset, const QString& path, QString* error);
 [[nodiscard]] PresetLoad load_preset(const QString& path);
 
-/// 绑定文件的读写。
+/// 伴生文件（`<预设名>.local.toml`）的全部内容。
 ///
-/// 文件不存在**不算失败**（还没绑过而已），返回空表、不设 error；
+/// 为什么把"槽位绑定"与"快捷方式图标"放在同一个结构里：它们是**同一个文件**。
+/// 分成两套读写 API 的话，`save_bindings()` 会把图标那一节抹掉（它只知道自己那部分），
+/// 于是"设了图标，改一次路径绑定就没了" —— 这类 bug 用户根本联想不到。
+struct LocalSettings {
+    SlotBindings bindings;  ///< 槽位 → 本机路径
+
+    /// 快捷方式用的图标（`.ico` / `.png`…）。空 = 用程序自带图标。
+    /// 也是**本机路径**（图标文件在这台机器上的位置），所以同样不进预设文件。
+    QString shortcut_icon;
+};
+
+/// 伴生文件的读写。
+///
+/// 文件不存在**不算失败**（还没绑过而已），返回空结构、不设 error；
 /// 文件存在但读不动/不是合法 TOML 时才设 `error` —— 那种情况必须让用户知道，
 /// 否则"绑定莫名其妙丢了"极难排查。
+[[nodiscard]] bool save_local_settings(const LocalSettings& settings,
+                                       const QString& preset_path,
+                                       QString* error);
+[[nodiscard]] LocalSettings load_local_settings(const QString& preset_path,
+                                                QString* error = nullptr);
+
+/// 只读/只写槽位绑定的便捷包装（等价于取 `LocalSettings::bindings`）。
+///
+/// ⚠️ `save_bindings()` **会保留**文件里已有的图标设置：它内部先读一遍再整体写回，
+/// 而不是拿一份只有绑定的结构去覆盖整个文件。
 [[nodiscard]] bool save_bindings(const SlotBindings& bindings,
                                  const QString& preset_path,
                                  QString* error);

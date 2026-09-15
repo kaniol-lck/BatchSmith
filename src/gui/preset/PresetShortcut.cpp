@@ -217,16 +217,21 @@ using EscapeFn = QString (*)(const QString&);
                                            const QString& program,
                                            const QString& arguments,
                                            const QString& name,
+                                           const QString& icon,
                                            QString* error) {
-    const QString text = QStringLiteral("[Desktop Entry]\n"
-                                        "Type=Application\n"
-                                        "Version=1.0\n"
-                                        "Name=%2\n"
-                                        "Comment=BatchSmith 预设启动器 —— 用「%2」这套配置打开\n"
-                                        "Exec=%1\n"
-                                        "Terminal=false\n"
-                                        "Categories=Utility;\n")
-                                 .arg(encode_command(program, arguments, &escape_desktop), name);
+    QString text = QStringLiteral("[Desktop Entry]\n"
+                                  "Type=Application\n"
+                                  "Version=1.0\n"
+                                  "Name=%2\n"
+                                  "Comment=BatchSmith 预设启动器 —— 用「%2」这套配置打开\n"
+                                  "Exec=%1\n"
+                                  "Terminal=false\n"
+                                  "Categories=Utility;\n")
+                           .arg(encode_command(program, arguments, &escape_desktop), name);
+    if (!icon.isEmpty()) {
+        // `.desktop` 的 Icon= 认绝对路径，也认主题里的图标名
+        text += QStringLiteral("Icon=%1\n").arg(escape_desktop(icon));
+    }
     if (!write_text_file(shortcut_path, text, error)) {
         return {};
     }
@@ -258,7 +263,8 @@ using EscapeFn = QString (*)(const QString&);
     return shortcut_path;
 }
 
-/// 从文本形式的快捷方式里读回程序与参数：找第一个"看起来是命令行"的行。
+/// 从文本形式的快捷方式里读回程序、参数与图标：找第一个"看起来是命令行"的行，
+/// 再找 `Icon=`。
 [[nodiscard]] bool read_text_shortcut(const QString& shortcut_path,
                                       bool percent_is_field_code,
                                       ShortcutTarget* target,
@@ -281,11 +287,10 @@ using EscapeFn = QString (*)(const QString&);
         // `.desktop` 用 `Exec=`，`.command` 用 `exec `
         if (line.startsWith(QLatin1String("Exec="))) {
             command = line.mid(5);
-            break;
-        }
-        if (line.startsWith(QLatin1String("exec "))) {
+        } else if (line.startsWith(QLatin1String("exec "))) {
             command = line.mid(5);
-            break;
+        } else if (line.startsWith(QLatin1String("Icon="))) {
+            target->icon = line.mid(5);
         }
     }
 
@@ -384,6 +389,7 @@ private:
                                               const QString& program,
                                               const QString& arguments,
                                               const QString& description,
+                                              const QString& icon,
                                               QString* error) {
     ComScope com;
     if (!com.usable()) {
@@ -404,11 +410,17 @@ private:
             wide(QDir::toNativeSeparators(QFileInfo(program).absolutePath()));
     const std::wstring wide_description = wide(description);
     const std::wstring wide_target = wide(QDir::toNativeSeparators(shortcut_path));
+    // 图标文件不在这里校验存在性：文件没了应当退回程序自带图标（Windows 自己就是这么做的），
+    // 而不是让"建快捷方式"整个失败。第二个参数 0 = 用该文件里的第 0 个图标。
+    const std::wstring wide_icon = wide(QDir::toNativeSeparators(icon));
 
     link->SetPath(wide_program.c_str());
     link->SetArguments(wide_arguments.c_str());
     link->SetWorkingDirectory(wide_working.c_str());
     link->SetDescription(wide_description.c_str());
+    if (!icon.isEmpty()) {
+        link->SetIconLocation(wide_icon.c_str(), 0);
+    }
 
     IPersistFile* file = nullptr;
     HRESULT hr = link->QueryInterface(IID_IPersistFile, reinterpret_cast<void**>(&file));
@@ -476,17 +488,21 @@ private:
     wchar_t program_buffer[4096] = {};
     wchar_t arguments_buffer[4096] = {};
     wchar_t working_buffer[4096] = {};
+    wchar_t icon_buffer[4096] = {};
+    int icon_index = 0;
     WIN32_FIND_DATAW find_data{};
 
     link->GetPath(program_buffer, 4096, &find_data, SLGP_UNCPRIORITY);
     link->GetArguments(arguments_buffer, 4096);
     link->GetWorkingDirectory(working_buffer, 4096);
+    link->GetIconLocation(icon_buffer, 4096, &icon_index);
     link->Release();
 
     // 统一成 `/` 分隔：.lnk 里存的是 `\`，而调用方（与测试）不该各自去转
     target->program = QDir::fromNativeSeparators(QString::fromWCharArray(program_buffer));
     target->arguments = QString::fromWCharArray(arguments_buffer);
     target->working_directory = QDir::fromNativeSeparators(QString::fromWCharArray(working_buffer));
+    target->icon = QDir::fromNativeSeparators(QString::fromWCharArray(icon_buffer));
     return true;
 }
 
@@ -515,21 +531,20 @@ QString default_shortcut_directory() {
     return batchsmith::core::default_preset_directory();
 }
 
-QString create_preset_shortcut(const QString& preset_path,
-                               const QString& directory,
-                               QString* error) {
-    const QFileInfo preset_info(preset_path);
+QString create_preset_shortcut(const ShortcutRequest& request, QString* error) {
+    const QFileInfo preset_info(request.preset_path);
     if (!preset_info.exists() || !preset_info.isFile()) {
         if (error != nullptr) {
             *error = QStringLiteral("要指向的预设不存在：%1")
-                             .arg(QDir::toNativeSeparators(preset_path));
+                             .arg(QDir::toNativeSeparators(request.preset_path));
         }
         return {};
     }
     // 绝对路径：相对路径是相对**快捷方式所在目录**解析的，而快捷方式多半会被挪到
     // 桌面上去 —— 那时相对路径就指向别处了
     const QString target_preset = preset_info.absoluteFilePath();
-    const QString target_directory = directory.isEmpty() ? default_shortcut_directory() : directory;
+    const QString target_directory =
+            request.directory.isEmpty() ? default_shortcut_directory() : request.directory;
 
     if (!QDir().mkpath(target_directory)) {
         if (error != nullptr) {
@@ -558,11 +573,13 @@ QString create_preset_shortcut(const QString& preset_path,
 
 #if defined(Q_OS_WIN)
     const QString description = QStringLiteral("用「%1」这个预设打开 BatchSmith").arg(name);
-    return create_windows_shortcut(shortcut_path, program, arguments, description, error);
+    return create_windows_shortcut(
+            shortcut_path, program, arguments, description, request.icon_path, error);
 #elif defined(Q_OS_MACOS)
+    // .command 没有图标位置：这个参数被忽略（见头文件的说明），不是失败
     return create_shell_script(shortcut_path, program, arguments, name, error);
 #else
-    return create_desktop_entry(shortcut_path, program, arguments, name, error);
+    return create_desktop_entry(shortcut_path, program, arguments, name, request.icon_path, error);
 #endif
 }
 

@@ -55,7 +55,8 @@ TEST_CASE("快捷方式：建出来的能读回来，程序与预设都对得上
     REQUIRE(write_preset(preset));
 
     QString error;
-    const QString shortcut = create_preset_shortcut(preset, desktop.path(), &error);
+    const QString shortcut =
+            create_preset_shortcut(ShortcutRequest{preset, desktop.path()}, &error);
     REQUIRE_MESSAGE(!shortcut.isEmpty(), error.toStdString());
 
     // 扩展名按平台来
@@ -78,7 +79,7 @@ TEST_CASE("快捷方式：预设不存在就不建，并说清是哪一个") {
 
     QString error;
     const QString missing = QDir(dir.path()).filePath(S(u"并不存在.toml"));
-    CHECK(create_preset_shortcut(missing, dir.path(), &error).isEmpty());
+    CHECK(create_preset_shortcut(ShortcutRequest{missing, dir.path()}, &error).isEmpty());
     CHECK(error.contains(S(u"并不存在")));
 
     // 失败时不该留下半个文件
@@ -94,7 +95,7 @@ TEST_CASE("快捷方式：目标目录不存在就建出来，而不是失败") 
     // 用户可能把快捷方式目录指到一个还没建的文件夹（比如刚同步过来的桌面）
     const QString nested = QDir(dir.path()).filePath(S(u"还没建的目录/里面"));
     QString error;
-    const QString shortcut = create_preset_shortcut(preset, nested, &error);
+    const QString shortcut = create_preset_shortcut(ShortcutRequest{preset, nested}, &error);
     REQUIRE_MESSAGE(!shortcut.isEmpty(), error.toStdString());
     CHECK(QFileInfo::exists(shortcut));
 }
@@ -111,7 +112,7 @@ TEST_CASE("快捷方式：路径里有空格也原样带过去") {
     REQUIRE(write_preset(preset));
 
     QString error;
-    const QString shortcut = create_preset_shortcut(preset, folder, &error);
+    const QString shortcut = create_preset_shortcut(ShortcutRequest{preset, folder}, &error);
     REQUIRE_MESSAGE(!shortcut.isEmpty(), error.toStdString());
     CHECK(QFileInfo(shortcut).completeBaseName() == S(u"番 剧 重命名"));
 
@@ -131,10 +132,10 @@ TEST_CASE("快捷方式：重名加序号，不覆盖已经建好的那个") {
     REQUIRE(write_preset(preset));
 
     QString error;
-    const QString first = create_preset_shortcut(preset, desktop.path(), &error);
+    const QString first = create_preset_shortcut(ShortcutRequest{preset, desktop.path()}, &error);
     REQUIRE_MESSAGE(!first.isEmpty(), error.toStdString());
 
-    const QString second = create_preset_shortcut(preset, desktop.path(), &error);
+    const QString second = create_preset_shortcut(ShortcutRequest{preset, desktop.path()}, &error);
     REQUIRE_MESSAGE(!second.isEmpty(), error.toStdString());
     CHECK(second != first);
     CHECK(QFileInfo(second).completeBaseName().startsWith(S(u"同一个")));
@@ -142,6 +143,45 @@ TEST_CASE("快捷方式：重名加序号，不覆盖已经建好的那个") {
     // 两个都在：去重不能靠覆盖
     CHECK(QFileInfo::exists(first));
     CHECK(QFileInfo::exists(second));
+}
+
+TEST_CASE("快捷方式：自定义图标能带过去") {
+    QTemporaryDir dir;
+    QTemporaryDir desktop;
+    REQUIRE(dir.isValid());
+    REQUIRE(desktop.isValid());
+
+    const QString preset = QDir(dir.path()).filePath(S(u"带图标.toml"));
+    REQUIRE(write_preset(preset));
+
+    // 图标文件本身不校验内容（快捷方式只存路径，渲染是 shell 的事），但路径要真的存在
+    const QString icon = QDir(dir.path()).filePath(S(u"番剧.png"));
+    {
+        QFile file(icon);
+        REQUIRE(file.open(QIODevice::WriteOnly));
+        file.write("placeholder");
+    }
+
+    QString error;
+    const QString shortcut = create_preset_shortcut(
+            ShortcutRequest{preset, desktop.path(), QFileInfo(icon).absoluteFilePath()}, &error);
+    REQUIRE_MESSAGE(!shortcut.isEmpty(), error.toStdString());
+
+    ShortcutTarget target;
+    REQUIRE_MESSAGE(read_shortcut(shortcut, &target, &error), error.toStdString());
+#if defined(Q_OS_MACOS)
+    // `.command` 没有图标位置：这个参数被忽略（文档里写明了，不是静默失败）
+    CHECK(target.icon.isEmpty());
+#else
+    CHECK(target.icon == QFileInfo(icon).absoluteFilePath());
+#endif
+
+    // 不设图标时不写图标 —— 免得指向一个空路径
+    const QString plain = create_preset_shortcut(ShortcutRequest{preset, desktop.path()}, &error);
+    REQUIRE_MESSAGE(!plain.isEmpty(), error.toStdString());
+    ShortcutTarget plain_target;
+    REQUIRE_MESSAGE(read_shortcut(plain, &plain_target, &error), error.toStdString());
+    CHECK(plain_target.icon.isEmpty());
 }
 
 TEST_CASE("快捷方式：读不了的文件要报错，而不是给一个空结果") {

@@ -184,13 +184,13 @@ int capture_help_shot(const QString& path) {
         const char* text;
     } demos[] = {
             {"番剧重命名.toml",
-             "[preset]\nname = '番剧重命名'\nversion = 1\n\n"
+             "[preset]\nname = '番剧重命名'\nversion = 1\nnote = '只留 mkv，其余原样列出'\n\n"
              "[[lists]]\nid = 'list1'\n\n"
              "  [lists.source]\n  kind = 'dir'\n  path = '${input}'\n  filter = '*.mkv'\n\n"
              "[[lists]]\nid = 'list2'\nitems = ['01', '02', '09', '10']\n\n"
              "[output]\ntemplate = 'mv \"$list1[i]$\" \"第$list2[i]$话 正片.mkv\"'\n"},
             {"字幕批量改名.toml",
-             "[preset]\nname = '字幕批量改名'\nversion = 1\n\n"
+             "[preset]\nname = '字幕批量改名'\nversion = 1\nnote = 'ass/srt 一套改成 简-原名'\n\n"
              "[[lists]]\nid = 'list1'\n\n"
              "  [lists.source]\n  kind = 'dir'\n  path = '${input}'\n  filter = '*.ass|*.srt'\n\n"
              "[[lists]]\nid = 'list2'\nitems = ['简', '繁']\n\n"
@@ -218,7 +218,7 @@ int capture_preset_shot(const QString& path) {
     const QStringList written = write_demo_presets();
 
     PresetManagerDialog dialog;
-    dialog.resize(820, 460);
+    dialog.resize(960, 520);
     dialog.reload();
 
     // 选中第一行：这样「创建快捷方式」在图上呈现"可用"的样子，

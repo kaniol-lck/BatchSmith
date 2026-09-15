@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #include <QString>
 
 /// 「双击就用某个预设打开 BatchSmith」的快捷方式。
@@ -30,12 +32,31 @@ struct ShortcutTarget {
     QString arguments;          ///< 参数**规范化**后的原文；含空格的参数一定是
                                 ///< 双引号包着的（见 read_shortcut 的说明）
     QString working_directory;  ///< 工作目录（文本格式的快捷方式没有这一项，留空）
+    QString icon;               ///< 自定义图标；空表示用程序自带图标
 
     /// 参数里是否带着 `--preset <路径>` 形式的预设指定
     [[nodiscard]] bool passes_preset() const;
 
     /// 取出 `--preset` 后面的那个路径（没写就返回空）
     [[nodiscard]] QString preset_path() const;
+};
+
+/// 要建什么样的快捷方式。
+///
+/// 用结构体而不是一串可选参数：这些都是彼此独立的可选设置，摊成参数列表之后
+/// 调用点会变成 `create(a, b, nullptr, QString(), true)` 这种谁也读不懂的样子。
+///
+/// 给了构造函数（而不是让它当聚合体）：`ShortcutRequest{a, b}` 这种只写前两个字段的
+/// 写法在 `-Wextra` 下会被 `-Wmissing-field-initializers` 拦下来，而那个警告是**对的** ——
+/// 少写一个字段时到底是有意省略还是忘了，读代码的人分不清。
+struct ShortcutRequest {
+    explicit ShortcutRequest(QString preset, QString directory_to_use = {}, QString icon = {})
+        : preset_path(std::move(preset)), directory(std::move(directory_to_use)),
+          icon_path(std::move(icon)) {}
+
+    QString preset_path;  ///< 指向哪个预设（必填，内部会转成绝对路径）
+    QString directory;    ///< 建到哪个目录；空 = `default_shortcut_directory()`
+    QString icon_path;    ///< 快捷方式用哪个图标；空 = 程序自带图标
 };
 
 /// 本平台上快捷方式的扩展名：`.lnk` / `.desktop` / `.command`。
@@ -49,14 +70,17 @@ struct ShortcutTarget {
 /// 创建"带 `--preset` 参数启动"的快捷方式，返回建出来的完整路径；
 /// 失败时返回空并把原因写进 `error`。
 ///
-/// `directory` 为空表示用 `default_shortcut_directory()`。
 /// `preset_path` 会被转成**绝对路径**：快捷方式里的相对路径是相对快捷方式自己
 /// 所在目录解析的，写相对路径会随快捷方式被挪动而失效 —— 而"挪到桌面"正是
 /// 用户接下来一定会做的事。
 ///
 /// 重名不覆盖：交给 `core::unique_file_path()` 加序号（见那儿的说明）。
-[[nodiscard]] QString create_preset_shortcut(const QString& preset_path,
-                                             const QString& directory = QString(),
+///
+/// 图标：Windows 走 `IShellLink::SetIconLocation`，Linux 写 `.desktop` 的 `Icon=`；
+/// **macOS 的 `.command` 没有图标位置，这个参数会被忽略**（要图标得做 `.app` 包，
+/// 那需要 Info.plist 与图标资源，代价不成比例）—— 忽略的事在文档里写清楚，
+/// 而不是假装成功。
+[[nodiscard]] QString create_preset_shortcut(const ShortcutRequest& request,
                                              QString* error = nullptr);
 
 /// 读回快捷方式指向的程序与参数。
