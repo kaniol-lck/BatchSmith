@@ -73,14 +73,21 @@ AllocAudit& alloc_audit() {
 /// 77 则原样透出，CI 侧一眼可辨。
 constexpr int kAllocAuditExitCode = 77;
 
-[[noreturn]] void alloc_audit_fail(const char* what, const void* block, std::size_t called_with,
+[[noreturn]] void alloc_audit_fail(const char* what,
+                                   const void* block,
+                                   std::size_t called_with,
                                    std::size_t recorded) {
     const AllocAudit& audit = alloc_audit();
     std::fprintf(stderr,
                  "[batchsmith] 分配器审计失败：%s\n"
                  "  块=%p  记账大小=%zu  调用方传入 old_size=%zu\n"
                  "  累计：分配 %zu 次 / 释放 %zu 次 / 存活 %zu 块\n",
-                 what, block, recorded, called_with, audit.allocations, audit.releases,
+                 what,
+                 block,
+                 recorded,
+                 called_with,
+                 audit.allocations,
+                 audit.releases,
                  audit.live.size());
     std::fflush(stderr);
     std::_Exit(kAllocAuditExitCode);
@@ -96,11 +103,13 @@ void alloc_audit_before(void* block, std::size_t old_size, std::size_t new_size)
     if (it == audit.live.end()) {
         alloc_audit_fail(new_size == 0 ? "释放了一个不属于本分配器的指针"
                                        : "realloc 了一个不属于本分配器的指针",
-                         block, old_size, 0);
+                         block,
+                         old_size,
+                         0);
     }
     if (it->second != old_size) {
-        alloc_audit_fail("old_size 与当年申请的字节数不符（记账被写坏了）", block, old_size,
-                         it->second);
+        alloc_audit_fail(
+                "old_size 与当年申请的字节数不符（记账被写坏了）", block, old_size, it->second);
     }
 }
 
@@ -139,7 +148,9 @@ void alloc_audit_report_leaks(const char* where) {
     if (audit.live.empty()) {
         return;
     }
-    std::fprintf(stderr, "[batchsmith] 分配器审计警告：%s 之后仍有 %zu 块未释放\n", where,
+    std::fprintf(stderr,
+                 "[batchsmith] 分配器审计警告：%s 之后仍有 %zu 块未释放\n",
+                 where,
                  audit.live.size());
     for (const auto& entry : audit.live) {
         std::fprintf(stderr, "  块=%p 大小=%zu\n", entry.first, entry.second);
@@ -209,6 +220,7 @@ void* tracked_allocator_audited(void* ud, void* ptr, size_t old_size, size_t new
     alloc_audit_after(ptr, new_size, result);
     return result;
 }
+
 #define BATCHSMITH_LUA_ALLOCATOR tracked_allocator_audited
 #else
 #define BATCHSMITH_LUA_ALLOCATOR tracked_allocator
