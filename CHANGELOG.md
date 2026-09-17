@@ -206,9 +206,30 @@
   MSVC 上这个开关本来就是空的。这个作业的**绿色只允许**
   表示"ASan 真的跑完了、什么都没报"；配置/构建/产物/测试没跑起来一律判红，但注解里
   写清"是本站作业坏了，不是被测代码有问题" —— 干净的运行另发一条正向注解。
+- **Windows 内存证据包**（CI 的 `windows-memdump`）：把"能带出 CI 的证据"打包挂到
+  一个预发布 `ci-diag` 上（每次覆盖）。动机是 ASan 干净之后**换一台不插桩的仪器**：
+  **PageHeap**（靠 IFEO 的 `GlobalFlag`/`PageHeapFlags` 打开，不需要 `gflags.exe`，
+  windows-latest 上也没有它）—— 保护页会让越界**在写的那条指令上**变成 AV，
+  而不是等堆元数据被踩坏之后由 OS 事后发现。采集内容：PageHeap 跑的输出与崩溃前用例、
+  **WER 事件日志（XML，含出错模块 + 偏移 + 异常码）**、链接器 **`.map`**（有了它，
+  "模块 + 偏移"可以在**本地**翻成函数名 —— 不需要调试器，也不需要仓库写权限）、
+  普通 Release 跑的输出、以及体积可控时的迷你转储。
+  ⚠️ 这个作业带**自检**：先用一个故意越界 1 字节的探针程序确认全页堆真的开着 ——
+  否则"PageHeap 下没崩"到底是没问题、还是仪器根本没开，分不清（本仓库踩过的
+  "沉默不等于干净"）。作业本身 `continue-on-error`，采集失败不拖红整轮 CI。
+- **`build` 作业的 Windows 测试步骤临时不阻断整轮 CI**（`continue-on-error`，
+  只对**非 tag 推送**生效）。那个 `0xc0000374` 从引入 Lua 沙箱起就一直挂着，
+  "每推一次整轮红"只会让人习惯性忽略红色；证据与结论改由 `windows-memdump` 报。
+  这一步在编排界面里**照样标红**，且 **tag 推送照旧阻断**（免得坏着发版）。
+  定位之后把那一行删掉。
 
 ### 修复
 
+- **CI 里的"制品"取不出来：`actions/upload-artifact` 的下载接口匿名读不到**。
+  实测 `GET /repos/<o>/<r>/actions/artifacts/<id>/zip` 匿名返回
+  `401 {"message":"Requires authentication"}`，网页那条 `.../artifacts/<id>` 是 404。
+  而**Release 附件可以匿名下载**（实测 Release 资产匿名 200）。所以诊断产物一律走
+  Release 附件，不上 artifact —— 这不是"顺手换个上传方式"，而是"上传了也拿不到"。
 - **`packaging/package-windows.sh` 传相对输出目录时会把归档打进 `dist/dist/`**：
   脚本先把两个目录过一遍 `cygpath -m`，再 `cd "$OUT_DIR"` 用 `$archive` 压缩 ——
   而 `cygpath -m` 对**相对入参是原样返回**的（实测 `cygpath -m dist` → `dist`），
