@@ -256,6 +256,20 @@
   **提前结束了**，报错是一句离根因很远的 `could not find expected ':'`。
   已改成数组累加；改 ci.yml 的脚本（`.workbuddy/tools/ci-patch/`）也加了自检 ——
   块内每个非空行都必须带 YAML 块缩进。
+- **`windows-heapcheck` 的自检误报了一整轮（是我自己加的检查写错了）**：自检原本看
+  `test cases: 1 |` 这个数字，但 doctest 打的是「**通过过滤器的**用例数」，而
+  `--first/--last` 的区间跳过是在这个计数**之后**才判的（`doctest.h` 的 run 循环）——
+  单跑一个用例时它照样打 `test cases: 155 | 155 passed | 0 failed | 0 skipped`。
+  于是 155 次单跑全被判成"空跑"、作业白红一轮。改用**断言数**作判据
+  （真跑到用例就一定产生断言）。⚠️ 顺带修正一个更早的解读：PageHeap 那行
+  `57 | 56 passed | 1 failed | 98 skipped` 里的 57 仍然是"循环走到的位置"
+  （没传 `--first/--last` 时两者相等），那部分结论不变。
+- **PowerShell 的 `Start-Process -PassThru` 拿不到退出码**：`ExitCode` 实测为 **null**
+  （打印出来是 `exit=4294967296 hex=0x`），而且 stdout 重定向会落成 **0 字节文件**；
+  空附件又被上传接口拒掉（`HTTP 400: Bad Content-Length`），连带整条
+  `gh release upload a b c` 全失败。改用 **python**（`subprocess.run().returncode`，
+  本机用抛 `0xC0000374` 的探针验证过：`returncode=3221226356`）；上传改为**逐个文件**上传
+  并跳过 0 字节文件，个别失败只记数、不再拖红。
 - **CI 里的"制品"取不出来：`actions/upload-artifact` 的下载接口匿名读不到**。
   实测 `GET /repos/<o>/<r>/actions/artifacts/<id>/zip` 匿名返回
   `401 {"message":"Requires authentication"}`，网页那条 `.../artifacts/<id>` 是 404。
