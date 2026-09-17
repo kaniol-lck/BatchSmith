@@ -269,6 +269,25 @@
   `success`**（`Windows x64` 在 run #26 就是这样 —— run 结论 success，日志里却是
   `Exit code 0xc0000374`）。所以判断"这个作业到底红没红"必须读日志或注解，
   **不能看 `jobs[].conclusion`**。
+- **CLI 崩溃自报**（构建开关 `BATCHSMITH_CRASH_REPORT`，默认关；CI 的 `windows-memdump`
+  用来做 ④c）：`bs` 在 `main()` **第一件事**就装一个 vectored exception handler，
+  崩溃时打印**出错指令相对主模块基址的 RVA**、访问类型（读/写）与出错地址，
+  然后以**退出码 42** 立刻退出。实现见 `src/cli/src/crash_report.cpp`，那里同时写了
+  "为什么不再绕 WER"。
+  配套一条**仪器自检**：`BATCHSMITH_CRASH_SELFTEST=1 bs --version` 会故意解引用空指针，
+  必须打出那行自报且退出码为 42 —— "没打出结论"与"仪器没装上"必须能分开，
+  这个项目已经在"仪器其实没生效"上白扔过好几轮（采集步静默死、审计开关没打开……）。
+  诊断链路至此变成：**PageHeap 让它当场 AV → CLI 自报 RVA → `bs.map` 翻函数名**，
+  全程不依赖 WER、不依赖转储、不依赖调试器。
+- **实测更正（run #27）：`GitHub runner` 上 WER 是空的，此前"绕开 doctest 让 WER 记
+  Fault offset"这条路走不通。** 证据包里 `wer-application-error.xml` 与 `wer-wer.xml`
+  都是 **0 字节**、迷你转储一个都没生成（LocalDumps 依赖 WER，自然一起没有）；
+  CLI 那次的输出文件同样 0 字节（`QTextStream` 有内部缓冲，进程被异常终结时没人替它 flush）。
+  ⚠️ 但同一轮有一条**反证**：PageHeap 整跑打出
+  `test cases: 57 | 56 passed | 1 failed | 98 skipped` —— 说明这个 AV
+  **是能被进程内处理器拿到的**，只是拿不到的东西不在进程里。这就是上面那条改动的由来。
+  同一轮还确认：PageHeap 下 `bs.exe` 跑同一条中止路径 **退出码 139（SIGSEGV）**
+  ⇒ 这条 bug 在**没有 doctest** 的环境里也照样复现，④c 的前提成立。
 
 ### 修复
 
@@ -302,8 +321,12 @@
   单看每一处都写对了、合起来却自相矛盾的那类改动，现在会被本机自检挡下。
 - **转储汇总把"一个转储都没生成"说成"超出 25MB 上限"**：`total -eq 0` 与 `total > 上限`
   原先共用一句 `else`，给出的是一句**假因果** —— 会把人往"体积"上引，而真因是
-  WER 的 LocalDumps 没生效或进程压根没崩在托管路径上。现在三种情形分开说，
-  0 字节那句直接点名要去查什么。
+  WER 的 LocalDumps 没生效或进程压根没崩在托管路径上（run #27 实测：确实是后者，
+  runner 上 WER 根本不产事件）。现在三种情形分开说，0 字节那句直接点名要去查什么。
+- **不再假定诊断产物的落点**：`/MAP` 产出的 `bs.map` 原先按 `build/diag/bin/bs.map` 硬取，
+  而 MSVC 的 map 文件名虽取自输出文件、**目录并不保证与 exe 同处**。
+  现在一律 `find build/diag -name 'bs.map' -print -quit` 去找，找不到就明说自己没找到 ——
+  这类"假定某产物一定在某处"的写法已经连累过两轮（另一处是 `ninja: unknown target 'bs'`）。
 - **Git Bash 的 `$?` 有歧义：127 既表示"命令找不到"，也表示"未映射的 NTSTATUS"**。
   本机用"抛出指定异常码的探针"（`.workbuddy/tools/statusprobe/exc.c`）实测：
   `0xC0000374`（堆损坏）→ **127**、`0xC00000FD`（栈溢出）→ **127**、

@@ -621,6 +621,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBATCHSMITH_BUILD_GUI=OFF \
             -DBATCHSMITH_BUILD_CLI=ON \
+            -DBATCHSMITH_CRASH_REPORT=ON \
             -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
             -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO /MAP" \
             > /tmp/configure.log 2>&1
@@ -644,7 +645,14 @@ jobs:
             echo "::error::内存证据包：配置摘要里 CLI 不是 ON ⇒ ④c 要用的 bs.exe 不会被构建（本站作业的问题，不是被测代码的问题）"
             exit 1
           fi
-          grep -a '构建目标' /tmp/configure.log | tr -d '\r' || true
+          # 同一个道理，第二道：④c 的正主是 CLI 的崩溃自报。它没开的话，
+          # 崩溃时照样什么都不打（run #27 实测 WER 与输出文件都是 0 字节），
+          # 整轮又白跑 —— 而"摘要里有没有这一行"在配置阶段就能判。
+          if ! grep -q '崩溃自报' /tmp/configure.log; then
+            echo "::error::内存证据包：配置摘要里没有「崩溃自报」⇒ ④c 崩了也拿不到出错指令 RVA（本站作业的问题）"
+            exit 1
+          fi
+          grep -a '构建目标\|崩溃自报' /tmp/configure.log | tr -d '\r' || true
 
       - name: 构建 core 测试（含 CLI bs：④c 的探针要用它绕开 doctest）
         shell: bash
@@ -858,45 +866,91 @@ jobs:
             fi
           done
           # ---------- /④b ----------
-          mark "④c 用 CLI 复现（绕开 doctest 的崩溃处理器，把 AV 变成未处理异常 → WER 记偏移）"
-          # ---------- ④c 用 CLI 复现：绕开 doctest，把 AV 变成未处理异常 ----------
+          mark "④c 用 CLI 复现（同一条中止路径，但没有 doctest；由 CLI 的 VEH 自报出错指令 RVA）"
+          # ---------- ④c 用 CLI 复现 + 自报出错指令地址 ----------
           #
           # 为什么需要这一步（run #24 的实测）：PageHeap 下第 57 个用例**不再堆损坏**，
           # 而是当场 AV —— 但那一句是 doctest 打印的：
           #   `test_engine.cpp(184): FATAL ERROR: test case CRASHED: SIGSEGV`
-          # 也就是说异常被 doctest 的未处理异常过滤器接住了 ⇒ **进不了 WER**，
-          # 于是拿不到「出错模块 + 偏移」，`.map` 也就无从翻译（WER 那份 XML 是空的）。
+          # 也就是说异常被 doctest 的未处理异常过滤器接住了 ⇒ 进不了 WER。
           #
-          # `bs eval` 走的是**同一个** core `evaluate_template`，但没有 doctest：
-          # 同一模板它本机实测以 `已中止：指令数超过上限（20000000）` 收场、退出码 1。
-          # 在 PageHeap 下跑它，如果踩到同一个地址，AV 就是**未处理异常**，
-          # WER 事件里会带 Fault offset，再用 `bs.map` 翻成函数名。
+          # ⚠️⚠️ **run #27 把"绕 WER"这条路彻底否掉了，别再往回走**：
+          #   证据包里 `wer-application-error.xml` 与 `wer-wer.xml` 都是 **0 字节**，
+          #   迷你转储也没生成 —— 说明 **GitHub runner 上 WER 根本不产事件**，
+          #   LocalDumps 配了也白配。CLI 那次的输出文件同样是 0 字节
+          #   （`QTextStream` 有内部缓冲，进程被异常终结时没人替它 flush）。
+          #   而同一轮的 PageHeap 整跑给了一条反证：
+          #   `[doctest] test cases: 57 | 56 passed | 1 failed | 98 skipped`
+          #   ⇒ 这个 AV **是能被进程内处理器拿到的**。
+          #
+          # 所以改成：CLI 自己装一个 VEH（`BATCHSMITH_CRASH_REPORT=ON`，
+          # 见 `src/cli/src/crash_report.cpp`），崩溃时直接打印**出错指令相对主模块基址的
+          # RVA**、访问类型与出错地址，然后以退出码 **42** 立刻退出。
+          # 有了这个 RVA，配 `bs.map` 就能翻成函数名 —— 不依赖 WER、不依赖转储、不依赖调试器。
           #
           # ⚠️ 模板里的 `$(…)` 必须用**单引号**包住，否则 bash 会当成命令替换去执行它。
-          bs_exe="$PWD/build/diag/bin/bs.exe"
-          if [ -x "$bs_exe" ]; then
+          #
+          # ⚠️ 产物一律**去找**，不假定落点：MSVC 的 `/MAP` 默认文件名取自输出文件，
+          # 但目录并不保证与 exe 同处（`/OUT` 带路径时行为随版本变）——
+          # 上一轮已经因为"假定某个目标/文件一定在"白扔过一轮，这里不再赌。
+          bs_exe=$(find build/diag -name 'bs.exe' -type f -print -quit 2>/dev/null || true)
+          if [ -n "$bs_exe" ]; then
+            echo "找到 CLI：$bs_exe"
+
+            # 仪器自检（**先验收仪器，再看它的结论**）：故意空指针写，逼出一个真异常。
+            # 没有这一道，"没打出 VEH 那行"既可能是"没崩"，也可能是"仪器根本没装上"——
+            # 这个项目已经在"仪器没生效"上白扔过好几轮。
+            mark "④c-1 崩溃自报仪器自检（故意空指针写，应打印 RVA 且退出码 42）"
+            set +e
+            BATCHSMITH_CRASH_SELFTEST=1 timeout 60 "$bs_exe" --version \
+              > "$bundle/cli-crash-selftest.txt" 2>&1
+            code_selftest=$?
+            set -e
+            head -6 "$bundle/cli-crash-selftest.txt" | tr -d '\r' || true
+            if [ "$code_selftest" -ne 42 ] || ! grep -qa '崩溃自报' "$bundle/cli-crash-selftest.txt"; then
+              echo "::error::崩溃自报仪器**没生效**（退出码 $code_selftest，应为 42）⇒ ④c 的结论不可信；本站作业的问题"
+            else
+              echo "仪器自检通过：VEH 已装上、RVA 已算出、退出码 42"
+            fi
+
             set +e
             timeout 300 "$bs_exe" eval '$(function() while true do end end)()$' \
               --list list1=a,b > "$bundle/run-cli-abort.txt" 2>&1
             code_cli=$?
             set -e
-            cp "$PWD/build/diag/bin/bs.map" "$bundle/bs.map" 2>/dev/null || true
+            bs_map=$(find build/diag -name 'bs.map' -type f -print -quit 2>/dev/null || true)
+            if [ -n "$bs_map" ]; then
+              cp "$bs_map" "$bundle/bs.map"
+              echo "找到符号表：$bs_map"
+            else
+              echo "::warning::没找到 bs.map（/MAP 可能没生效）—— 有 RVA 也没有函数名可翻"
+            fi
             echo "CLI 中止路径（PageHeap 下）：退出码 $code_cli"
             # ⚠️ 退出码在这里是**残缺**的：bash 对无法映射到信号的 NTSTATUS 一律报 127，
             #    所以 127 既可能是"命令没找到"也可能是"0xC0000374"。判据改用**输出内容**：
-            #    正常中止会打印「已中止：指令数超过上限」；走到 AV 就没有这句。
-            if grep -qa '已中止' "$bundle/run-cli-abort.txt"; then
-              echo "  → 正常走到了「已中止」这条路径（未触发 AV）⇒ 本探针这一次没抓住，看下面的 WER 事件与下一轮"
+            #    * 42  + `崩溃自报` 行 ⇒ 当场 AV，且已经拿到了出错指令 RVA（这是要的东西）
+            #    * `已中止：指令数超过上限` ⇒ 这一次没复现
+            if grep -qa '崩溃自报' "$bundle/run-cli-abort.txt"; then
+              echo "  → ✓ 当场 AV，VEH 已报出出错指令 RVA（下面这行就是本轮的正主）"
+              grep -a 'RVA' "$bundle/run-cli-abort.txt" | tr -d '\r' || true
+            elif grep -qa '已中止' "$bundle/run-cli-abort.txt"; then
+              echo "  → 正常走到了「已中止」这条路径（未触发 AV）⇒ 本探针这一次没抓住，看下一轮"
             else
-              echo "  → 没有「已中止」这句 ⇒ 极可能是当场 AV（未处理异常），下面的 WER 事件里应有 Fault offset"
+              echo "  → 既没有「崩溃自报」也没有「已中止」⇒ 看下面这几行的原文"
             fi
-            head -5 "$bundle/run-cli-abort.txt" | tr -d '\r' || true
+            head -8 "$bundle/run-cli-abort.txt" | tr -d '\r' || true
           else
-            echo "::warning::bs.exe 没构建出来 —— ④c 跳过（这一步是拿「出错偏移」的唯一通道）"
+            echo "::warning::bs.exe 没构建出来 —— ④c 跳过（这一步是拿「出错指令 RVA」的通道）"
           fi
 
-          mark "⑤ WER 事件日志"
+          mark "⑤ WER 事件日志（⚠️ run #27 起已确认：runner 上它是空的，只作为存档）"
           # ---------- ⑤ WER 事件日志：用 XML，免得撞上控制台代码页 ----------
+          #
+          # ⚠️ **别再把结论寄托在这里**：run #27 的实测是两份 XML 都 **0 字节**、
+          # 迷你转储也没生成 ⇒ **GitHub runner 上 WER 根本不产事件**（LocalDumps 白配）。
+          # 保留这一步只是为了"万一哪天它有了"，以及留一份"当时确实没有"的存档。
+          # 出错位置的正主是 ④c 的自报 RVA。
+          #
           # 事件是异步写的，崩完不一定立刻可见 —— 轮询到出现为止
           for i in 1 2 3 4 5 6; do
             wevtutil qe Application /q:'*[System[Provider[@Name="Application Error"]]]' \
@@ -966,14 +1020,22 @@ jobs:
             echo "⚠️ 上面这行的第一个数字是「通过过滤器的用例数」，不是跑过的数量；"
             echo "   但**没有** --first/--last 时两者相等，所以它 < 总数就说明循环中途结束了。"
             echo
-            echo "== 出错模块与偏移（WER，详见证据包里的 wer-*.xml）=="
+            echo "== 出错指令地址（④c：CLI 的 VEH 自报 —— **本轮的正主**）=="
+            echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）"
+            grep -a '崩溃自报\|出错指令\|RVA\|堆/映像' "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
+            echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
+            grep -a '崩溃自报\|出错指令\|RVA\|堆/映像' "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
+            echo "→ 拿上面那个 RVA 配证据包里的 bs.map，用"
+            echo "  .workbuddy/tools/ciwatch/symbolicate.py bs.map <RVA>  就能翻出函数名。"
+            echo
+            echo "== WER（存档；⚠️ runner 上它一直是空的，别再把结论寄托在这）=="
+            echo "两个 XML 的字节数: $(wc -c < "$bundle/wer-application-error.xml" 2>/dev/null || echo '?') / $(wc -c < "$bundle/wer-wer.xml" 2>/dev/null || echo '?')"
             grep -ao 'bs\.exe\|batchsmith_tests\.exe\|pageheap_probe\.exe' "$bundle/wer-application-error.xml" | sort -u || true
-            # ④c 的意义就在下面这几行：有了「出错模块 + 偏移」，配 bs.map 就能翻成函数名
             grep -ao 'Exception code: 0x[0-9a-fA-F]*\|Faulting module name: [^,<]*\|Fault offset: 0x[0-9a-fA-F]*' \
               "$bundle/wer-application-error.xml" 2>/dev/null | head -8 || true
-            echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
-            echo "（WER 为空不代表没崩：doctest 在 Windows 上装了未处理异常过滤器，异常被它接住就进不了 WER ——"
-            echo "  这也正是 ④c 改用 CLI 复现的原因：CLI 下没有 doctest，AV 会变成未处理异常）"
+            echo "（run #27 起已确认：这里空 **不代表**没崩 —— runner 上 WER 根本不产事件、"
+            echo "  LocalDumps 也没转储；测试二进制那边则是被 doctest 的未处理异常过滤器接住了。"
+            echo "  所以出错位置一律看上面 ④c 的 VEH 自报，WER 只当存档。）"
             echo
             echo "证据包: https://github.com/$GITHUB_REPOSITORY/releases/tag/ci-diag"
           } > "$bundle/summary.txt"

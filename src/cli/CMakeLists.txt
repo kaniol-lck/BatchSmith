@@ -8,6 +8,18 @@
 add_executable(bs
     src/main.cpp)
 
+# 崩溃自报只在诊断构建里进来。
+#
+# 刻意**不**做成一进就有的东西：它会抢在 UnhandledExceptionFilter / WER 之前把进程
+# 结束掉（退出码 42），对最终用户来说等于"崩溃时不再生成系统层面的报告"。诊断时才要这个。
+if(BATCHSMITH_CRASH_REPORT)
+    if(NOT WIN32)
+        message(FATAL_ERROR "BATCHSMITH_CRASH_REPORT 目前只在 Windows 上有实现（VEH + .map 符号化）。")
+    endif()
+    target_sources(bs PRIVATE src/crash_report.cpp)
+    target_compile_definitions(bs PRIVATE BATCHSMITH_CRASH_REPORT=1)
+endif()
+
 target_link_libraries(bs
     PRIVATE
         BatchSmith::Core

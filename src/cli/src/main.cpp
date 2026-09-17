@@ -21,6 +21,13 @@
 #include "batchsmith/core/preset/preset.hpp"
 #include "batchsmith/core/version.hpp"
 
+#if defined(BATCHSMITH_CRASH_REPORT) && defined(Q_OS_WIN)
+/// 崩溃自报（诊断构建专用，见 crash_report.cpp）。
+/// ⚠️ 必须放在**文件作用域**（不能塞进下面的匿名 namespace）：它的定义在另一个
+/// 编译单元里，进了匿名 namespace 就变成内部链接 ⇒ 直接 undefined reference。
+void install_crash_reporter();
+#endif
+
 namespace {
 
 /// CLI 的输出统一走 stdout / stderr。
@@ -360,6 +367,12 @@ int main(int argc, char* argv[]) {
 #if defined(Q_OS_WIN)
     // Windows 控制台默认不是 UTF-8，不设这一行中文输出会乱码
     SetConsoleOutputCP(CP_UTF8);
+#endif
+
+#if defined(BATCHSMITH_CRASH_REPORT) && defined(Q_OS_WIN)
+    // **第一件事**就是装崩溃自报：要赶在任何 Sandbox 建立之前。
+    // 实现与"为什么不再绕 WER"写在 src/cli/src/crash_report.cpp 的头部。
+    install_crash_reporter();
 #endif
 
     QCoreApplication app(argc, argv);

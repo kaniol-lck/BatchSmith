@@ -59,6 +59,7 @@ option(BATCHSMITH_BUILD_TESTS "构建单元测试"               ON)
 option(BATCHSMITH_STRICT      "把本项目代码的编译器警告当作错误" OFF)
 option(BATCHSMITH_LTO         "对 Release 构建启用 LTO（体积与性能优化）" ON)
 option(BATCHSMITH_ALLOC_AUDIT "审计沙箱的 Lua 分配器（诊断 CI 专用，默认关闭）" OFF)
+option(BATCHSMITH_CRASH_REPORT "让 CLI 在崩溃时自报出错指令地址（诊断 CI 专用，默认关闭）" OFF)
 
 # ===========================================================================
 # 编译警告策略
@@ -173,6 +174,9 @@ message(STATUS "  构建目标        : GUI=${BATCHSMITH_BUILD_GUI}  CLI=${BATCH
 message(STATUS "  严格警告        : ${BATCHSMITH_STRICT}")
 if(BATCHSMITH_ALLOC_AUDIT)
     message(STATUS "  分配器审计      : ON（诊断构建：逐块记账，违规时以退出码 77 停机）")
+endif()
+if(BATCHSMITH_CRASH_REPORT)
+    message(STATUS "  崩溃自报        : ON（诊断构建：CLI 装 VEH，崩溃时打印出错指令的 RVA，退出码 42）")
 endif()
 message(STATUS "=======================================================================")
 message(STATUS "")
