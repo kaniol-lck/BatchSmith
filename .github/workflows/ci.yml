@@ -327,31 +327,47 @@ jobs:
           grep -aE 'test cases:|assertions:|Status:' /tmp/all.log | tail -3 | tr -d '\r'
 
           echo "=== 2) 逐个用例单独跑一个进程：崩了的用例就是元凶 ==="
-          # 单独进程跑的价值：整跑时"崩在 Y"只能说明 Y 是受害者；
+          # 单独进程跑的价值：整跑时「崩在 Y」只能说明 Y 是受害者；
           # 一个用例单独跑还崩，那个用例自己就是元凶。
+          #
+          # ⚠️ 选用例**必须用序号**（--first/--last），不能再用 -tc="$name"：
+          #    doctest 的用例名是中文，而 Windows 上非 ASCII 的 argv 会按 ANSI 代码页
+          #    解码，跟二进制里的 UTF-8 字面量对不上 ⇒ 过滤命中 0 个 ⇒ **每次单跑都"成功"**。
+          #    本机实测（MinGW Release）：`-tc="区段只允许表达式：赋值语句编译不过"`
+          #    → `test cases: 0 | 0 passed | 0 failed | 155 skipped`，
+          #    而 `--first=56 --last=56` 真的跑到了那个用例。
+          #    也就是说下面这套循环原先一直在**空转**：155 次「0 个异常退出」什么都没证明。
+          #    序号是纯 ASCII，不受编码影响；末尾还加了自检（单跑选到 0 个用例就判通道坏）。
           set +e
-          # doctest 的 --list-test-cases 是"两行表头 + 用例名 + 两行表尾"，且输出是 CRLF：
+          # doctest 的 --list-test-cases 是「两行表头 + 用例名 + 两行表尾」，且输出是 CRLF：
           # 直接用行号切会踩到 \r，按前缀过滤更稳。
-          "$exe" --list-test-cases | tr -d '\r' \
-            | grep -v '^\[doctest\]' | grep -vE '^={10,}$' > /tmp/cases.txt
-          total=$(wc -l < /tmp/cases.txt)
+          mapfile -t names < <("$exe" --list-test-cases | tr -d '\r' \
+            | grep -v '^\[doctest\]' | grep -vE '^={10,}$')
+          total=${#names[@]}
           echo "共 $total 个用例"
           bad=0
-          while IFS= read -r name; do
-            "$exe" -tc="$name" -nv > /tmp/one.log 2>&1
+          empty=0
+          idx=0
+          while [ "$idx" -lt "$total" ]; do
+            idx=$((idx + 1))
+            "$exe" --first="$idx" --last="$idx" -nv > /tmp/one.log 2>&1
             rc=$?
+            # 自检：这一次单跑到底选到用例了没有（选到 0 个的"成功"是假绿）
+            if ! grep -aqE 'test cases: +1 \|' /tmp/one.log; then
+              empty=$((empty + 1))
+            fi
             if [ "$rc" -ne 0 ]; then
               bad=$((bad + 1))
               if [ "$bad" -le 8 ]; then
-                echo "::error::单独跑「$name」异常退出，退出码 $rc"
+                echo "::error::单独跑 #$idx「${names[$((idx - 1))]}」异常退出，退出码 $rc"
                 grep -a '\[heap\]' /tmp/one.log | head -1 | while IFS= read -r line; do
                   echo "::error::  $line"
                 done
               else
-                echo "单独跑「$name」异常退出，退出码 $rc（已超过注解上限，见日志）"
+                echo "单独跑 #$idx「${names[$((idx - 1))]}」异常退出，退出码 $rc（已超过注解上限，见日志）"
               fi
             fi
-          done < /tmp/cases.txt
+          done
           set -e
 
           # ---- 这一步自己也要能被质疑 ----
@@ -360,11 +376,13 @@ jobs:
           # cases.txt 为空 ⇒ $total=0 $bad=0 ⇒ 照样绿）。两种情况的差别只在日志里，
           # 而 job 日志匿名读不到（要仓库写权限）—— 所以：
           #   1) 干净时也发一条**正向**注解：warning 级匿名可读，又不会让 job 变红；
-          #   2) 一个用例都没跑到就 exit 1 —— 诊断通道坏了，必须看得见。
-          echo "逐个跑完成：$total 个用例里有 $bad 个异常退出"
-          echo "::warning::堆诊断小结：整跑退出码 $code；$total 个用例逐个单跑，$bad 个异常退出"
-          if [ "$total" -eq 0 ]; then
-            echo "::error::一个用例都没跑到 —— 诊断通道本身坏了（exe 路径？--list-test-cases 的输出格式变了？），本次结论不可信"
+          #   2) 一个用例都没跑到就 exit 1 —— 诊断通道坏了，必须看得见；
+          #   3) **只要有一次单跑选到 0 个用例**（序号过滤失效 / 编码退回 -tc 的坑），
+          #      也算通道坏了：那种"0 个异常退出"是假绿，不能当结论用。
+          echo "逐个跑完成：$total 个用例里有 $bad 个异常退出；$empty 次单跑没选到用例"
+          echo "::warning::堆诊断小结：整跑退出码 $code；$total 个用例逐个单跑，$bad 个异常退出，$empty 次空跑"
+          if [ "$total" -eq 0 ] || [ "$empty" -gt 0 ]; then
+            echo "::error::单跑通道没选到用例（$empty/$total 次）—— 本次结论不可信（exe 路径？序号过滤失效？）"
             exit 1
           fi
 
@@ -649,13 +667,48 @@ jobs:
           probe_ifeo='HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\pageheap_probe.exe'
 
           # ---------- ① 普通 Release 跑一遍（与 CI 红点同配置）----------
+          #
+          # ⚠️ 为什么还要用 PowerShell 再跑一次拿退出码：**bash 报的退出码是残缺的**。
+          #    Git Bash 对「无法映射到信号的 NTSTATUS」一律报 **127**，而那正好也是
+          #    「命令找不到」的退出码。本机实测（.workbuddy/tools/statusprobe/exc.c）：
+          #      0xC0000374（堆损坏）→ 127      0xC00000FD（栈溢出）→ 127
+          #      0xC0000005（AV）    → 139      0xC000001D（非法指令）→ 132
+          #    ⇒ 看到 127 **不能**推断"脚本没找着 exe"（上一轮就是这么误判的）。
+          #    PowerShell 的 Process.ExitCode 保留完整的 32 位值：
+          #      0xC0000374 = 3221226356（.NET 里以负数 -1073740940 出现）
+          cat > "$RUNNER_TEMP/exitcode.ps1" <<'PS_EOF'
+          param([string]$Exe, [string]$Tag)
+          $argList = @('-s', '-nv')
+          if ($Tag -match '^c(\d+)$') {
+              $argList = @("--first=$($Matches[1])", "--last=$($Matches[1])", '-s', '-nv')
+          } elseif ($Tag -match '^r(\d+)-(\d+)$') {
+              $argList = @("--first=$($Matches[1])", "--last=$($Matches[2])", '-s', '-nv')
+          }
+          $out = Join-Path $env:RUNNER_TEMP "ps-$Tag.out.txt"
+          $err = Join-Path $env:RUNNER_TEMP "ps-$Tag.err.txt"
+          $p = Start-Process -FilePath $Exe -ArgumentList $argList -Wait -PassThru -NoNewWindow `
+               -RedirectStandardOutput $out -RedirectStandardError $err
+          $c = $p.ExitCode
+          $u = $c
+          if ($c -lt 0) { $u = $c + 4294967296 }
+          Write-Output ("exit={0} hex=0x{1:X8} out={2}" -f $u, $c, $out)
+          PS_EOF
+
+          ps_run() {  # $1 = 标签：plain / c55 / c56 / c57 / r55-57
+            powershell.exe -NoProfile -ExecutionPolicy Bypass \
+              -File "$RUNNER_TEMP/exitcode.ps1" -Exe "$exe" -Tag "$1" 2>&1 | tail -1
+          }
+
           reg delete "$test_ifeo" /f >/dev/null 2>&1 || true
           set +e
           timeout 900 "$exe" -s -nv > "$bundle/run-plain.txt" 2>&1
           code_plain=$?
           set -e
           cp "$map" "$bundle/batchsmith_tests.map"
-          echo "普通跑：退出码 $code_plain"
+          echo "普通跑（bash）：退出码 $code_plain"
+          code_plain_ps=$(ps_run plain)
+          cp "$RUNNER_TEMP/ps-plain.out.txt" "$bundle/run-plain-ps.txt" 2>/dev/null || true
+          echo "普通跑（PowerShell 取完整退出码）：$code_plain_ps"
 
           # ---------- ② 打开 PageHeap：靠 IFEO 的 GlobalFlag，不需要 gflags.exe ----------
           # （windows-latest 上没有 gflags.exe，它随 Debugging Tools for Windows 发布）
@@ -709,6 +762,33 @@ jobs:
           code_heap=$?
           set -e
           echo "PageHeap 跑：退出码 $code_heap"
+          # ---------- ④b 关掉 PageHeap，再把嫌犯用例各自单独跑一个进程 ----------
+          # 单跑的价值：整跑里「崩在 Y」只说明 Y 是受害者；**单跑还崩，它自己才是元凶**。
+          # 关掉 PageHeap 是为了让这几次跑与 CI 红点同配置（全页堆换掉整个堆布局，
+          # 上一轮的证据正是「PageHeap 下不崩」，所以不能再带着它跑）。
+          # 用例用序号选：中文用例名经 argv 传进去匹配不到（见 heapcheck 作业里的实测）。
+          #
+          #   55 区段里的语法错误被定位到具体区段
+          #   56 区段只允许表达式：赋值语句编译不过
+          #   57 沙箱中止会透出为求值失败      ← 两轮证据都指向这一个
+          #   r55-57 三个连在一起跑 —— 用来区分「自己崩」与「被前面的用例带崩」
+          reg delete "$test_ifeo" /f >/dev/null 2>&1 || true
+          mapfile -t case_names < <("$exe" --list-test-cases | tr -d '\r' \
+            | grep -v '^\[doctest\]' | grep -vE '^={10,}$')
+          echo "用例总数: ${#case_names[@]}"
+          case_report=()
+          for tag in c55 c56 c57 r55-57; do
+            line=$(ps_run "$tag")
+            cp "$RUNNER_TEMP/ps-$tag.out.txt" "$bundle/run-$tag.txt" 2>/dev/null || true
+            echo "单跑 $tag：$line"
+            case_report+=("$tag -> $line")
+          done
+          echo "--- 单跑用例名对照 ---"
+          for idx in 55 56 57; do
+            if [ "$idx" -le "${#case_names[@]}" ]; then
+              echo "#$idx ${case_names[$((idx - 1))]}"
+            fi
+          done
 
           # ---------- ⑤ WER 事件日志：用 XML，免得撞上控制台代码页 ----------
           # 事件是异步写的，崩完不一定立刻可见 —— 轮询到出现为止
@@ -744,10 +824,27 @@ jobs:
             echo "== PageHeap 自检 =="
             echo "$verdict"
             echo
+            echo "== 退出码对照（避免再把 127 读成「命令找不到」）=="
+            echo "127 = 未映射的 NTSTATUS（0xC0000374 堆损坏 / 0xC00000FD 栈溢出）**或**命令找不到"
+            echo "139 = SIGSEGV(0xC0000005)；132 = SIGILL(0xC000001D)；124 = timeout 超时"
+            echo "（所以 bash 报 127 时要配 PowerShell 的完整退出码一起看，见下面几行）"
+            echo
             echo "== 普通 Release 跑（与 CI 红点同配置）=="
-            echo "退出码: $code_plain"
-            echo "最后用例: $(last_case "$bundle/run-plain.txt")"
+            echo "退出码(bash): $code_plain ；退出码(PowerShell): $code_plain_ps"
+            echo "打出来的用例数: $(grep -ac '^TEST CASE:' "$bundle/run-plain.txt" 2>/dev/null || echo 0) / ${#case_names[@]} 个"
+            echo "最后 3 个用例:"
+            grep -a '^TEST CASE:' "$bundle/run-plain.txt" 2>/dev/null | tail -3 | tr -d '\r' || true
             grep -aE 'test cases:' "$bundle/run-plain.txt" | tail -1 || true
+            echo
+            echo "== 嫌犯用例序号对照（--list-test-cases 的顺序，从 1 数起）=="
+            for idx in 55 56 57; do
+              if [ "$idx" -le "${#case_names[@]}" ]; then
+                echo "#$idx ${case_names[$((idx - 1))]}"
+              fi
+            done
+            echo
+            echo "== 嫌犯单跑（Release，各自一个进程，PageHeap 已关）=="
+            if [ "${#case_report[@]}" -gt 0 ]; then printf '%s\n' "${case_report[@]}"; fi
             echo
             echo "== PageHeap 跑 =="
             echo "退出码: $code_heap"
@@ -756,6 +853,7 @@ jobs:
             echo
             echo "== 出错模块（WER，详见证据包里的 wer-*.xml）=="
             grep -ao 'batchsmith_tests\.exe\|pageheap_probe\.exe' "$bundle/wer-application-error.xml" | sort -u || true
+            echo "（空不代表没崩：doctest 在 Windows 上装了未处理异常过滤器，异常被它接住就进不了 WER）"
             echo
             echo "证据包: https://github.com/$GITHUB_REPOSITORY/releases/tag/ci-diag"
           } > "$bundle/summary.txt"
@@ -785,17 +883,42 @@ jobs:
 
           GitHub 的**制品（artifact）下载接口匿名读不到**，Release 附件可以 ——
           所以证据挂在这里。内容先看 \`summary.txt\`。"
-          if gh release view ci-diag >/dev/null 2>&1; then
-            gh release upload ci-diag "$bundle"/* --clobber
+
+          # 上传失败必须**自曝原因**：job 日志匿名读不到，注解是唯一能带出信息的通道。
+          # 上一轮这一步只留下 "Process completed with exit code 1"，看不出是权限、
+          # tag 冲突还是网络 —— 于是又得盲猜一轮。这里把 gh 的 stderr 原文提升成注解，
+          # 顺便汇报 gh 自己的身份；而且**不再把作业判红**：结论已由采集步的注解带出，
+          # 附件只是补充，不值得为它把整轮 CI 拖红。
+          log=/tmp/gh-release.log
+          : > "$log"
+          rc=0
+          if gh release view ci-diag >>"$log" 2>&1; then
+            gh release upload ci-diag "$bundle"/* --clobber >>"$log" 2>&1 || rc=$?
           else
             gh release create ci-diag --prerelease \
               --title "CI 诊断证据包（自动生成）" \
               --notes "$notes" \
-              "$bundle"/*
+              "$bundle"/* >>"$log" 2>&1 || rc=$?
           fi
-          gh release edit ci-diag --notes "$notes"
-          echo "已更新：https://github.com/$GITHUB_REPOSITORY/releases/tag/ci-diag"
-          gh release view ci-diag --json assets --jq '.assets[] | "\(.name)\t\(.size)"'
+
+          if [ "$rc" -ne 0 ]; then
+            {
+              echo "上传失败，退出码 $rc"
+              echo "--- gh 输出（末尾 25 行）---"
+              tail -25 "$log" || true
+              echo "--- gh auth status ---"
+              gh auth status 2>&1 | head -12 || true
+            } > /tmp/gh-report.txt
+            tr -d '\r' < /tmp/gh-report.txt | sed -e 's/%/%25/g' \
+              | awk '{printf "%s%%0A", $0}' > /tmp/gh-report.esc
+            echo "::warning::内存证据包上传 Release 失败（附件没上去；结论已由采集步那条注解带出）：$(cat /tmp/gh-report.esc)"
+            exit 0
+          fi
+
+          gh release edit ci-diag --notes "$notes" >>"$log" 2>&1 || true
+          echo "::warning::内存证据包已更新：https://github.com/$GITHUB_REPOSITORY/releases/tag/ci-diag"
+          gh release view ci-diag --json assets --jq '.assets[] | "\(.name)\t\(.size)"' || true
+          exit 0
 
   # =========================================================================
   # 代码格式

@@ -223,8 +223,39 @@
   这一步在编排界面里**照样标红**，且 **tag 推送照旧阻断**（免得坏着发版）。
   定位之后把那一行删掉。
 
+- **诊断作业改用「序号」选用例，并给 bash 的退出码配一把「翻译尺」**（run #21 之后的修正）：
+  - `windows-heapcheck` / `windows-memdump` 原先用 `-tc="$用例名"` 选单个用例逐个跑。
+    **这在 Windows 上根本不成立**：用例名是中文，而非 ASCII 的 argv 会按 ANSI 代码页解码，
+    跟二进制里的 UTF-8 字面量对不上 ⇒ 过滤命中 0 个 ⇒ 每次单跑都"成功"（跑 0 个、退出码 0）。
+    本机实测（MinGW Release）：`-tc="区段只允许表达式：赋值语句编译不过"`
+    → `test cases: 0 | 0 passed | 0 failed | 155 skipped`，而 `--first=56 --last=56`
+    真的跑到了那个用例。也就是说 heapcheck 那句"155 个用例逐个单跑、0 个异常退出"
+    一直是在**空转**，什么都没证明。现在改用**序号**（`--first`/`--last`，纯 ASCII），
+    并加了自检：**只要有一次单跑选到 0 个用例，就判通道坏、作业判红**。
+  - `windows-memdump` 额外把**嫌疑用例各自单独跑一个进程**（Release，且先把 PageHeap 关掉），
+    再加一次 `r55-57` 连跑 —— 用来区分"自己崩"与"被前面的用例带崩"。序号取自
+    `--list-test-cases` 的顺序，那三个用例正好是 55/56/57。
+  - **bash 报的退出码是残缺的**，见下面「修复」里的 127 条目。摘要里现在并列
+    bash 退出码与 PowerShell 的完整退出码。
+- **上传证据包失败时自曝原因**：`windows-memdump` 的上传步原先只留下
+  `Process completed with exit code 1`，看不出是权限、tag 冲突还是网络。
+  现在把 `gh` 的 stderr 原文与 `gh auth status` 一起提升成注解，而且**不再判红** ——
+  结论已由采集步那条注解带出，附件只是补充。
+
 ### 修复
 
+- **Git Bash 的 `$?` 有歧义：127 既表示"命令找不到"，也表示"未映射的 NTSTATUS"**。
+  本机用"抛出指定异常码的探针"（`.workbuddy/tools/statusprobe/exc.c`）实测：
+  `0xC0000374`（堆损坏）→ **127**、`0xC00000FD`（栈溢出）→ **127**、
+  `0xC0000005`（访问违例）→ 139（SIGSEGV）、`0xC000001D` → 132（SIGILL）。
+  所以"退出码 127"根本不能拿来推断"脚本把 exe 路径写错了" —— run #21 就这么误判过一轮。
+  要拿真正的异常码必须走保留完整 32 位值的途径（PowerShell 的 `Process.ExitCode`，
+  或 ctest 自己的 `Exit code 0x…`）。诊断作业的摘要里现在带一张对照表。
+- **YAML 块标量里的续行不能跑到列 0**：修 `ci.yml` 时写了
+  `case_report="$case_report` ＋ 换行 ＋ 续行，续行掉到列 0 就把 `run: |` 这个块
+  **提前结束了**，报错是一句离根因很远的 `could not find expected ':'`。
+  已改成数组累加；改 ci.yml 的脚本（`.workbuddy/tools/ci-patch/`）也加了自检 ——
+  块内每个非空行都必须带 YAML 块缩进。
 - **CI 里的"制品"取不出来：`actions/upload-artifact` 的下载接口匿名读不到**。
   实测 `GET /repos/<o>/<r>/actions/artifacts/<id>/zip` 匿名返回
   `401 {"message":"Requires authentication"}`，网页那条 `.../artifacts/<id>` 是 404。
