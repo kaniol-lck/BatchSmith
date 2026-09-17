@@ -629,11 +629,11 @@ jobs:
           fi
           tail -3 /tmp/configure.log
 
-      - name: 构建 core 测试
+      - name: 构建 core 测试（含 CLI bs：④c 的探针要用它绕开 doctest）
         shell: bash
         run: |
           set +e
-          cmake --build build/diag --target batchsmith_tests --parallel > /tmp/build.log 2>&1
+          cmake --build build/diag --target batchsmith_tests bs --parallel > /tmp/build.log 2>&1
           code=$?
           set -e
           if [ "$code" -ne 0 ]; then
@@ -688,6 +688,8 @@ jobs:
 
           test_ifeo='HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\batchsmith_tests.exe'
           probe_ifeo='HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\pageheap_probe.exe'
+          # ④c 的探针：CLI bs.exe 也要单独开全页堆（IFEO 键是按 exe 名分的）
+          bs_ifeo='HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options\bs.exe'
 
           # ---------- ① 普通 Release 跑一遍（与 CI 红点同配置）----------
           #
@@ -761,6 +763,8 @@ jobs:
           reg add "$test_ifeo"  /v PageHeapFlags /t REG_SZ    /d 0x3        /f
           reg add "$probe_ifeo" /v GlobalFlag    /t REG_DWORD /d 0x02000000 /f
           reg add "$probe_ifeo" /v PageHeapFlags /t REG_SZ    /d 0x3        /f
+          reg add "$bs_ifeo"    /v GlobalFlag    /t REG_DWORD /d 0x02000000 /f
+          reg add "$bs_ifeo"    /v PageHeapFlags /t REG_SZ    /d 0x3        /f
           reg query "$test_ifeo" || true
 
           mark "③ PageHeap 自检（越界探针）"
@@ -837,6 +841,35 @@ jobs:
             fi
           done
           # ---------- /④b ----------
+          mark "④c 用 CLI 复现（绕开 doctest 的崩溃处理器，把 AV 变成未处理异常 → WER 记偏移）"
+          # ---------- ④c 用 CLI 复现：绕开 doctest，把 AV 变成未处理异常 ----------
+          #
+          # 为什么需要这一步（run #24 的实测）：PageHeap 下第 57 个用例**不再堆损坏**，
+          # 而是当场 AV —— 但那一句是 doctest 打印的：
+          #   `test_engine.cpp(184): FATAL ERROR: test case CRASHED: SIGSEGV`
+          # 也就是说异常被 doctest 的未处理异常过滤器接住了 ⇒ **进不了 WER**，
+          # 于是拿不到「出错模块 + 偏移」，`.map` 也就无从翻译（WER 那份 XML 是空的）。
+          #
+          # `bs eval` 走的是**同一个** core `evaluate_template`，但没有 doctest：
+          # 同一模板它本机实测以 `已中止：指令数超过上限（20000000）` 收场、退出码 1。
+          # 在 PageHeap 下跑它，如果踩到同一个地址，AV 就是**未处理异常**，
+          # WER 事件里会带 Fault offset，再用 `bs.map` 翻成函数名。
+          #
+          # ⚠️ 模板里的 `$(…)` 必须用**单引号**包住，否则 bash 会当成命令替换去执行它。
+          bs_exe="$PWD/build/diag/bin/bs.exe"
+          if [ -x "$bs_exe" ]; then
+            set +e
+            timeout 300 "$bs_exe" eval '$(function() while true do end end)()$' \
+              --list list1=a,b > "$bundle/run-cli-abort.txt" 2>&1
+            code_cli=$?
+            set -e
+            cp "$PWD/build/diag/bin/bs.map" "$bundle/bs.map" 2>/dev/null || true
+            echo "CLI 中止路径（PageHeap 下）：退出码 $code_cli"
+            head -5 "$bundle/run-cli-abort.txt" | tr -d '\r' || true
+          else
+            echo "::warning::bs.exe 没构建出来 —— ④c 跳过（这一步是拿「出错偏移」的唯一通道）"
+          fi
+
           mark "⑤ WER 事件日志"
           # ---------- ⑤ WER 事件日志：用 XML，免得撞上控制台代码页 ----------
           # 事件是异步写的，崩完不一定立刻可见 —— 轮询到出现为止
@@ -845,10 +878,10 @@ jobs:
               /f:xml /c:5 /rd:true > "$bundle/wer-application-error.xml" 2>&1 || true
             wevtutil qe Application /q:'*[System[Provider[@Name="Windows Error Reporting"]]]' \
               /f:xml /c:5 /rd:true > "$bundle/wer-wer.xml" 2>&1 || true
-            if grep -qa 'pageheap_probe\|batchsmith_tests' "$bundle/wer-application-error.xml"; then break; fi
+            if grep -qa 'pageheap_probe\|batchsmith_tests\|bs\.exe' "$bundle/wer-application-error.xml"; then break; fi
             sleep 5
           done
-          grep -ao 'batchsmith_tests\.exe\|pageheap_probe\.exe' "$bundle/wer-application-error.xml" | sort -u || true
+          grep -ao 'bs\.exe\|batchsmith_tests\.exe\|pageheap_probe\.exe' "$bundle/wer-application-error.xml" | sort -u || true
 
           mark "⑥ 转储"
           # ---------- ⑥ 转储：只在体积可控时带上（推不上去等于没有）----------
@@ -903,9 +936,14 @@ jobs:
             echo "⚠️ 上面这行的第一个数字是「通过过滤器的用例数」，不是跑过的数量；"
             echo "   但**没有** --first/--last 时两者相等，所以它 < 总数就说明循环中途结束了。"
             echo
-            echo "== 出错模块（WER，详见证据包里的 wer-*.xml）=="
-            grep -ao 'batchsmith_tests\.exe\|pageheap_probe\.exe' "$bundle/wer-application-error.xml" | sort -u || true
-            echo "（空不代表没崩：doctest 在 Windows 上装了未处理异常过滤器，异常被它接住就进不了 WER）"
+            echo "== 出错模块与偏移（WER，详见证据包里的 wer-*.xml）=="
+            grep -ao 'bs\.exe\|batchsmith_tests\.exe\|pageheap_probe\.exe' "$bundle/wer-application-error.xml" | sort -u || true
+            # ④c 的意义就在下面这几行：有了「出错模块 + 偏移」，配 bs.map 就能翻成函数名
+            grep -ao 'Exception code: 0x[0-9a-fA-F]*\|Faulting module name: [^,<]*\|Fault offset: 0x[0-9a-fA-F]*' \
+              "$bundle/wer-application-error.xml" 2>/dev/null | head -8 || true
+            echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
+            echo "（WER 为空不代表没崩：doctest 在 Windows 上装了未处理异常过滤器，异常被它接住就进不了 WER ——"
+            echo "  这也正是 ④c 改用 CLI 复现的原因：CLI 下没有 doctest，AV 会变成未处理异常）"
             echo
             echo "证据包: https://github.com/$GITHUB_REPOSITORY/releases/tag/ci-diag"
           } > "$bundle/summary.txt"
