@@ -3,6 +3,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if defined(BATCHSMITH_ALLOC_AUDIT)
+#include <unordered_map>
+#endif
 
 extern "C" {
 #include "lauxlib.h"
@@ -37,6 +40,115 @@ int panic_handler(lua_State* state) {
                  message != nullptr ? message : "(无消息)");
     return 0;  // 返回后 Lua 仍然会 abort —— 这是刻意的：内部不变量破坏了，不该继续跑
 }
+
+#if defined(BATCHSMITH_ALLOC_AUDIT)
+
+/// 诊断用：给分配器发出去的每一块记账，专门查「分配器收到的入参是否自洽」。
+///
+/// **动机**（2026-09-17）：MSVC Release 下单元测试以 `0xC0000374`（堆损坏）失败，
+/// 而同一套用例在 ASan（Release + 插桩）与 Debug 调试堆下**全部干净**。
+/// 越界写在任何一种插桩下都会被抓到 —— "全绿"本身就说明它不是越界写，
+/// 更可能是 **free / realloc 收到了未知指针，或大小与当初申请的不符**：
+/// ASan 换掉了整个分配器，这类调用会被它"消化"成正常调用；而 NT 堆在 LFH 上
+/// 会直接判定堆损坏、一句有用的话都不说。这把仪器就是要把这个猜测变成
+/// 一条可读的 stderr —— 抓到就停机，抓不到也等于排除掉一大类原因。
+///
+/// 前提：沙箱不跨线程使用（单线程假设成立）。map 刻意用 `new` 泄漏出去，
+/// 免得"静态对象析构顺序"这种与主题无关的坑混进来。
+struct AllocAudit {
+    std::unordered_map<const void*, std::size_t> live;
+    std::size_t allocations = 0;
+    std::size_t releases = 0;
+};
+
+AllocAudit& alloc_audit() {
+    static AllocAudit* instance = new AllocAudit();  // 故意泄漏
+    return *instance;
+}
+
+/// 违规停机码。
+///
+/// 选 **77** 是因为它能穿过 bash 的退出码翻译：bash 对无法映射到信号的 NTSTATUS
+/// （包括我们要区分的 `0xC0000374`）一律报 **127**，与"命令找不到"撞车；
+/// 77 则原样透出，CI 侧一眼可辨。
+constexpr int kAllocAuditExitCode = 77;
+
+[[noreturn]] void alloc_audit_fail(const char* what, const void* block, std::size_t called_with,
+                                   std::size_t recorded) {
+    const AllocAudit& audit = alloc_audit();
+    std::fprintf(stderr,
+                 "[batchsmith] 分配器审计失败：%s\n"
+                 "  块=%p  记账大小=%zu  调用方传入 old_size=%zu\n"
+                 "  累计：分配 %zu 次 / 释放 %zu 次 / 存活 %zu 块\n",
+                 what, block, recorded, called_with, audit.allocations, audit.releases,
+                 audit.live.size());
+    std::fflush(stderr);
+    std::_Exit(kAllocAuditExitCode);
+}
+
+/// 分配/释放**之前**：查这次调用本身是否自洽。
+void alloc_audit_before(void* block, std::size_t old_size, std::size_t new_size) {
+    AllocAudit& audit = alloc_audit();
+    if (block == nullptr) {
+        return;  // 全新分配：没有可查的历史
+    }
+    const auto it = audit.live.find(block);
+    if (it == audit.live.end()) {
+        alloc_audit_fail(new_size == 0 ? "释放了一个不属于本分配器的指针"
+                                       : "realloc 了一个不属于本分配器的指针",
+                         block, old_size, 0);
+    }
+    if (it->second != old_size) {
+        alloc_audit_fail("old_size 与当年申请的字节数不符（记账被写坏了）", block, old_size,
+                         it->second);
+    }
+}
+
+/// 分配/释放**之后**：把账本更新成与真实状态一致。
+void alloc_audit_after(void* block, std::size_t new_size, void* result) {
+    AllocAudit& audit = alloc_audit();
+    if (block == nullptr) {
+        if (result != nullptr) {  // 分配失败（例如撞上内存上限）就不记账
+            audit.live.emplace(result, new_size);
+            ++audit.allocations;
+        }
+        return;
+    }
+    if (new_size == 0) {
+        const auto it = audit.live.find(block);
+        const std::size_t recorded = it == audit.live.end() ? 0 : it->second;
+        if (result != nullptr) {
+            alloc_audit_fail("释放的返回值不是 nullptr（分配器契约被破坏）", block, 0, recorded);
+        }
+        audit.live.erase(block);
+        ++audit.releases;
+        return;
+    }
+    // realloc：失败时调用方仍认为老块有效（Lua 的约定），所以只有成功才动账。
+    if (result == nullptr) {
+        return;
+    }
+    audit.live.erase(block);
+    audit.live.emplace(result, new_size);
+}
+
+/// `lua_close` 结束后账本应该一块不剩。剩了就说明有块没被 Lua 释放。
+/// 只打警告不判红 —— 这条是"顺手多看一眼"，不是本次要查的主线。
+void alloc_audit_report_leaks(const char* where) {
+    AllocAudit& audit = alloc_audit();
+    if (audit.live.empty()) {
+        return;
+    }
+    std::fprintf(stderr, "[batchsmith] 分配器审计警告：%s 之后仍有 %zu 块未释放\n", where,
+                 audit.live.size());
+    for (const auto& entry : audit.live) {
+        std::fprintf(stderr, "  块=%p 大小=%zu\n", entry.first, entry.second);
+    }
+    std::fflush(stderr);
+    audit.live.clear();  // 下一个沙箱从干净的账本开始
+}
+
+#endif  // BATCHSMITH_ALLOC_AUDIT
 
 /// 带计数与上限的分配器。超限返回 nullptr ⇒ Lua 抛 LUA_ERRMEM。
 void* tracked_allocator(void* ud, void* ptr, size_t old_size, size_t new_size) {
@@ -84,6 +196,23 @@ void* tracked_allocator(void* ud, void* ptr, size_t old_size, size_t new_size) {
     }
     return block;
 }
+
+#if defined(BATCHSMITH_ALLOC_AUDIT)
+/// 审计版分配器：只在调用前后各加一层"入参自洽性"检查，其余原样转发。
+///
+/// 之所以用**包一层**而不是往 `tracked_allocator` 的每个 return 点塞检查：
+/// 那个函数有 4 个出口（Lua 创建窗口 / 关闭窗口 / 释放 / 内存上限拒绝），
+/// 逐点插入一旦漏一处，得到的就是"看起来跑了、其实没查全"的假证据。
+void* tracked_allocator_audited(void* ud, void* ptr, size_t old_size, size_t new_size) {
+    alloc_audit_before(ptr, old_size, new_size);
+    void* result = tracked_allocator(ud, ptr, old_size, new_size);
+    alloc_audit_after(ptr, new_size, result);
+    return result;
+}
+#define BATCHSMITH_LUA_ALLOCATOR tracked_allocator_audited
+#else
+#define BATCHSMITH_LUA_ALLOCATOR tracked_allocator
+#endif
 
 /// 指令数 + 墙钟，共用同一个 count 钩子（ADR-6：零额外线程）
 void limit_hook(lua_State* state, lua_Debug* /*debug*/) {
@@ -213,7 +342,7 @@ void store_self(lua_State* state, Sandbox* self) {
 }  // namespace
 
 Sandbox::Sandbox(Limits limits) : m_limits(limits) {
-    m_state = lua_newstate(tracked_allocator, nullptr);
+    m_state = lua_newstate(BATCHSMITH_LUA_ALLOCATOR, nullptr);
     if (m_state == nullptr) {
         raise(Violation::Memory, QStringLiteral("无法创建 Lua 状态"));
         return;
@@ -231,7 +360,7 @@ Sandbox::Sandbox(Limits limits) : m_limits(limits) {
     // 无论中间发生什么都只读到正确指针。
     store_self(m_state, this);
 
-    lua_setallocf(m_state, tracked_allocator, m_state);
+    lua_setallocf(m_state, BATCHSMITH_LUA_ALLOCATOR, m_state);
     lua_atpanic(m_state, panic_handler);
 
     m_account.started = Clock::now();
@@ -244,8 +373,13 @@ Sandbox::~Sandbox() {
         // 先清掉 extraspace，避免关闭过程中的分配触发我们的记账/报错
         store_self(m_state, nullptr);
         lua_close(m_state);
+#if defined(BATCHSMITH_ALLOC_AUDIT)
+        alloc_audit_report_leaks("lua_close");
+#endif
     }
 }
+
+#undef BATCHSMITH_LUA_ALLOCATOR
 
 Sandbox* Sandbox::from_state(lua_State* state) {
     return load_self(state);

@@ -58,6 +58,7 @@ option(BATCHSMITH_BUILD_CLI   "构建命令行工具 bs"          ON)
 option(BATCHSMITH_BUILD_TESTS "构建单元测试"               ON)
 option(BATCHSMITH_STRICT      "把本项目代码的编译器警告当作错误" OFF)
 option(BATCHSMITH_LTO         "对 Release 构建启用 LTO（体积与性能优化）" ON)
+option(BATCHSMITH_ALLOC_AUDIT "审计沙箱的 Lua 分配器（诊断 CI 专用，默认关闭）" OFF)
 
 # ===========================================================================
 # 编译警告策略
@@ -170,5 +171,8 @@ message(STATUS "  Qt              : ${Qt6_VERSION}  (${QT6_INSTALL_PREFIX})")
 message(STATUS "  第三方 (submodule): Lua / sol2 / toml++ / doctest")
 message(STATUS "  构建目标        : GUI=${BATCHSMITH_BUILD_GUI}  CLI=${BATCHSMITH_BUILD_CLI}  TESTS=${BATCHSMITH_BUILD_TESTS}")
 message(STATUS "  严格警告        : ${BATCHSMITH_STRICT}")
+if(BATCHSMITH_ALLOC_AUDIT)
+    message(STATUS "  分配器审计      : ON（诊断构建：逐块记账，违规时以退出码 77 停机）")
+endif()
 message(STATUS "=======================================================================")
 message(STATUS "")

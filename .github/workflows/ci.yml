@@ -657,7 +657,23 @@ jobs:
           mkdir -p "$bundle" /c/diag-dumps
           exe="$PWD/build/diag/bin/batchsmith_tests.exe"
           map="$PWD/build/diag/bin/batchsmith_tests.map"
+          # ⚠️ 交给 **python** 的路径必须是 Windows 形态（`D:\a\...`），不能是 Git Bash
+          #    的 `/d/a/...`：bash 自己的程序（ls / timeout / cp）两种都认，
+          #    python 的 subprocess 只认前者。run #23 就死在这上面 —— `exe="$PWD/..."`
+          #    交给 runexe.py 后立刻 FileNotFoundError，而 `set -e` 把整个采集步
+          #    **静默**中止：日志里只剩 "Process completed with exit code 1"，
+          #    连 PageHeap / 嫌犯单跑 / WER / 摘要全都没来得及做。
+          #    （同类前科：relative 入参 `cygpath -m` 原样返回那个坑。）
+          exe_win=$(cygpath -w "$exe")
+          echo "exe(bash)=$exe"
+          echo "exe(python)=$exe_win"
+          python -c "import os,sys; sys.exit(0 if os.path.isfile(sys.argv[1]) else 9)" "$exe_win" \
+            || { echo "::error::内存证据包：python 视角下 exe 不存在（$exe_win）—— 本站作业的问题"; exit 1; }
           ls -la "$exe" "$map"
+
+          # 进度标记：采集步很长，任何一步静默退出都会让"死在哪"变成猜谜。
+          # 每进入一段就打一行；日志里最后一条标记就是断点。
+          mark() { echo "--- 采集进度: $* ---"; }
 
           last_case() {
             grep -a '^TEST CASE:' "$1" 2>/dev/null | tail -1 || true
@@ -689,6 +705,11 @@ jobs:
           cat > "$RUNNER_TEMP/runexe.py" <<'PY_EOF'
           import os, re, subprocess, sys
           exe, tag = sys.argv[1], sys.argv[2]
+          # 先自证入参可用：一旦路径形态不对（例如收到 /d/a/... 这种 Git Bash 路径），
+          # 要说清楚是"这站作业传错了"，而不是抛一个 FileNotFoundError 让人去猜。
+          if not os.path.isfile(exe):
+              print('ERROR runexe: python 看不到 exe: %r' % exe)
+              sys.exit(9)
           args = ['-s', '-nv']
           m = re.fullmatch(r'c(\d+)', tag)
           if m:
@@ -707,9 +728,21 @@ jobs:
           PY_EOF
 
           runexe() {  # $1 = 标签：plain / c55 / c56 / c57 / r55-57
-            python "$RUNNER_TEMP/runexe.py" "$exe" "$1" 2>&1 | tail -1
+            # 刻意**吞掉** runexe.py 的非零退出并把它打成一行可见的输出：
+            # 调用点全在 `set -e` 生效之后，直接让它失败会把整步静默带走
+            # （run #23 的教训：只剩一句 "exit code 1"，四段证据全丢）。
+            local out rc
+            out=$(python "$RUNNER_TEMP/runexe.py" "$exe_win" "$1" 2>&1)
+            rc=$?
+            if [ "$rc" -ne 0 ]; then
+              printf 'runexe(%s) 失败 rc=%d: %s\n' "$1" "$rc" \
+                "$(printf '%s' "$out" | tr '\n' '|' | tail -c 400)"
+            else
+              printf '%s\n' "$out" | tr -d '\r' | tail -1
+            fi
           }
 
+          mark "① 普通 Release 跑（与 CI 红点同配置）"
           reg delete "$test_ifeo" /f >/dev/null 2>&1 || true
           set +e
           timeout 900 "$exe" -s -nv > "$bundle/run-plain.txt" 2>&1
@@ -721,6 +754,7 @@ jobs:
           cp "$RUNNER_TEMP/ps-plain.out.txt" "$bundle/run-plain-py.txt" 2>/dev/null || true
           echo "普通跑（python 取完整退出码）：$code_plain_py"
 
+          mark "② 打开 PageHeap（IFEO 的 GlobalFlag，不需要 gflags.exe）"
           # ---------- ② 打开 PageHeap：靠 IFEO 的 GlobalFlag，不需要 gflags.exe ----------
           # （windows-latest 上没有 gflags.exe，它随 Debugging Tools for Windows 发布）
           reg add "$test_ifeo"  /v GlobalFlag    /t REG_DWORD /d 0x02000000 /f
@@ -729,6 +763,7 @@ jobs:
           reg add "$probe_ifeo" /v PageHeapFlags /t REG_SZ    /d 0x3        /f
           reg query "$test_ifeo" || true
 
+          mark "③ PageHeap 自检（越界探针）"
           # ---------- ③ 自检：故意越界 1 字节，开了全页堆就该在守卫页上当场 AV ----------
           probe="$RUNNER_TEMP/probe"
           mkdir -p "$probe"
@@ -767,12 +802,14 @@ jobs:
           fi
           echo "PageHeap 自检：$verdict"
 
+          mark "④ PageHeap 下整跑"
           # ---------- ④ PageHeap 下再跑一遍（全页堆很慢，给足超时）----------
           set +e
           timeout 2400 "$exe" -s -nv > "$bundle/run-pageheap.txt" 2>&1
           code_heap=$?
           set -e
           echo "PageHeap 跑：退出码 $code_heap"
+          mark "④b 嫌犯用例单跑（c55 / c56 / c57 / r55-57）"
           # ---------- ④b 关掉 PageHeap，再把嫌犯用例各自单独跑一个进程 ----------
           # 单跑的价值：整跑里「崩在 Y」只说明 Y 是受害者；**单跑还崩，它自己才是元凶**。
           # 关掉 PageHeap 是为了让这几次跑与 CI 红点同配置（全页堆换掉整个堆布局）。
@@ -800,6 +837,7 @@ jobs:
             fi
           done
           # ---------- /④b ----------
+          mark "⑤ WER 事件日志"
           # ---------- ⑤ WER 事件日志：用 XML，免得撞上控制台代码页 ----------
           # 事件是异步写的，崩完不一定立刻可见 —— 轮询到出现为止
           for i in 1 2 3 4 5 6; do
@@ -812,6 +850,7 @@ jobs:
           done
           grep -ao 'batchsmith_tests\.exe\|pageheap_probe\.exe' "$bundle/wer-application-error.xml" | sort -u || true
 
+          mark "⑥ 转储"
           # ---------- ⑥ 转储：只在体积可控时带上（推不上去等于没有）----------
           total=0
           for d in /c/diag-dumps/*.dmp; do
@@ -829,6 +868,7 @@ jobs:
               | tee "$bundle/dumps.txt"
           fi
 
+          mark "⑦ 摘要"
           # ---------- ⑦ 摘要：人类可读 + 一条注解 ----------
           {
             echo "== PageHeap 自检 =="
@@ -953,6 +993,115 @@ jobs:
           gh release view ci-diag --json assets --jq '.assets[] | "\(.name)\t\(.size)"' || true
           exit 0
           exit 0
+
+  # =========================================================================
+  # Windows 分配器审计（诊断）
+  #
+  # 要回答的问题：`0xC0000374` 是不是「分配器收到了脏入参」？
+  #
+  # 推理链（写在 src/core/src/sandbox/sandbox.cpp 的 AllocAudit 上）：
+  #   ① 越界写这类原因**基本可以排除** —— 无论 ASan 插桩还是 Debug 的 CRT 调试堆，
+  #      都会在事发时当场报出来，而两者在同一套 155 个用例上全绿；
+  #   ② 剩下的高频嫌疑是 free / realloc 收到了**未知指针**或**大小不符**：
+  #      这类调用在 ASan 的替换分配器下会被消化成正常调用，在 NT 堆的 LFH 上
+  #      却直接判堆损坏、一句话都不说 —— 正好对上"只有 MSVC Release 红"。
+  #   ③ 所以给沙箱的 Lua 分配器加逐块记账，违规时以**退出码 77** 停机并在
+  #      stderr 写清是哪种违规（77 能穿过 bash 的退出码翻译，127 不能）。
+  #
+  # 抓不到也同样是结论：说明分配器入参自洽，可以把排查方向移开这一类。
+  # 开关默认关（逐块记账很慢），只有本作业打开。
+  # =========================================================================
+  windows-alloc-audit:
+    name: Windows 分配器审计
+    runs-on: windows-latest
+    # 与 windows-memdump 一致：本作业只为出结论，不该把整轮 CI 拖红
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装 Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2019_64
+          cache: true
+
+      - name: 安装 Ninja
+        shell: bash
+        run: |
+          python -m pip install --quiet ninja
+          echo "$(python -c 'import ninja; print(ninja.BIN_DIR)')" >> "$GITHUB_PATH"
+
+      - name: 准备 MSVC 环境
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: 配置（Release + 分配器审计，不含界面）
+        shell: bash
+        env:
+          CMAKE_PREFIX_PATH: ${{ env.QT_ROOT_DIR }}
+        run: |
+          set -uo pipefail
+          if ! cmake --preset ci -DBATCHSMITH_ALLOC_AUDIT=ON -DBATCHSMITH_BUILD_GUI=OFF \
+               > /tmp/cfg.log 2>&1; then
+            tail -20 /tmp/cfg.log | tr -d '\r' | while IFS= read -r l; do echo "::error::$l"; done
+            echo "::error::分配器审计作业：配置步失败（本站作业的问题，不是被测代码的问题）"
+            exit 1
+          fi
+          # 仪器必须自证"真的开着" —— 否则"没抓到"这条结论一文不值
+          if ! grep -q '分配器审计' /tmp/cfg.log; then
+            echo "::error::配置摘要里没有「分配器审计」那一行 ⇒ 开关没生效，本轮结论不可信"
+            exit 1
+          fi
+          grep '分配器审计' /tmp/cfg.log
+
+      - name: 构建 core 测试
+        shell: bash
+        run: |
+          if cmake --build --preset ci --target batchsmith_tests --parallel \
+               > /tmp/build.log 2>&1; then
+            tail -2 /tmp/build.log
+          else
+            grep -nE 'error [A-Z]+[0-9]+:|error:|fatal error' /tmp/build.log | head -10 \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            echo "::error::分配器审计作业：构建步失败（本站作业的问题，不是被测代码的问题）"
+            exit 1
+          fi
+
+      - name: 跑测试并读审计结论
+        shell: bash
+        run: |
+          set -uo pipefail
+          exe=./build/ci/bin/batchsmith_tests.exe
+          out=/tmp/alloc.log
+          : > "$out"
+          set +e
+          "$exe" -s -nv > "$out" 2>&1
+          code=$?
+          set -e
+          cases=$(grep -ac '^TEST CASE:' "$out" || true)
+          # 用例名在 --list-test-cases 里顶格输出（本机实测 155 行），
+          # 首尾各有一行 [doctest] 与一条 ==== 分隔线，去掉它们再数
+          total=$("$exe" --list-test-cases 2>/dev/null | tr -d '\r' \
+            | grep -v '^\[doctest\]' | grep -vE '^={10,}$' | grep -c . || true)
+          echo "退出码(bash): $code （127 = 未映射的 NTSTATUS 或命令找不到，两种都出现过）"
+          echo "打出来的用例数: $cases / ${total:-?}"
+          echo "--- [batchsmith] 输出（审计器的原话）---"
+          grep -a '\[batchsmith\]' "$out" || echo "(没有 [batchsmith] 输出)"
+          echo "--- 最后 3 个用例 ---"
+          grep -a '^TEST CASE:' "$out" | tail -3 | tr -d '\r' || true
+          echo "--- 末尾 15 行 ---"
+          tail -15 "$out" | tr -d '\r' || true
+
+          esc() { tr -d '\r' | sed -e 's/%/%25/g' | awk '{printf "%s%%0A", $0}'; }
+          if grep -qa '分配器审计失败' "$out"; then
+            echo "::error::分配器审计**抓到违规** —— 这正是本轮要找的东西：$(grep -a -A3 '分配器审计失败' "$out" | head -8 | esc)"
+          elif grep -qa '分配器审计警告' "$out"; then
+            echo "::warning::分配器审计有告警（账本里还有未释放的块，非主线线索）：$(grep -a -A3 '分配器审计警告' "$out" | head -8 | esc)"
+          else
+            echo "::warning::分配器审计未触发 ⇒ 分配器拿到的指针与大小都是自洽的，这一类原因可以划掉；本次退出码 $code，用例数 $cases / ${total:-?}"
+          fi
 
   # =========================================================================
   # 代码格式

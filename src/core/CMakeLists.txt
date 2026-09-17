@@ -52,3 +52,9 @@ target_link_libraries(batchsmith_core
         batchsmith::tomlplusplus)
 
 target_link_libraries(batchsmith_core PRIVATE batchsmith_warnings)
+
+# 诊断开关：给沙箱的 Lua 分配器加逐块记账（见 sandbox.cpp 里的 AllocAudit）。
+# 只在 CI 的专门作业里打开 —— 它对每次分配/释放都做一次哈希表查找，慢得离谱。
+if(BATCHSMITH_ALLOC_AUDIT)
+    target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_ALLOC_AUDIT=1)
+endif()
