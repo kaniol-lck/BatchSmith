@@ -258,6 +258,17 @@
   而 `bs eval` 走的是同一个 core `evaluate_template` 却没有 doctest：同一模板在
   PageHeap 下踩到同一个地址时，AV 是**未处理异常**，WER 事件里会带 Fault offset，
   配 `bs.map` 就能翻成函数名。（模板里的 `$(…)` 必须单引号包住，否则 bash 会去执行它。）
+- **诊断结论（run #26，`50f4f6a`）**：分配器审计这一条**未触发** —— 也就是
+  free / realloc 收到的指针都属于本分配器、`old_size` 与记账一致，`lua_close` 之后
+  也没有未释放的块。加上此前 ASan 与 Debug 调试堆的双双全绿，
+  "分配器收到脏入参"这一类原因**可以划掉**。剩下的口径收窄成：
+  **一处只在 MSVC Release + LFH 布局下才致命的写越界，落在 ASan 保护不到的那类内存上** ——
+  最可能是 Qt（`Qt6Core.dll`，非插桩）分配出来的块：ASan 的 Windows 实现只保护**插桩模块**
+  里的分配，而 PageHeap 是对所有堆生效的，这恰好解释了"ASan 全绿 / 全页堆当场 AV"这个组合。
+  ⚠️ 顺带记下一条取数经验：**作业级 `continue-on-error` 会让 jobs 接口把失败的作业报成
+  `success`**（`Windows x64` 在 run #26 就是这样 —— run 结论 success，日志里却是
+  `Exit code 0xc0000374`）。所以判断"这个作业到底红没红"必须读日志或注解，
+  **不能看 `jobs[].conclusion`**。
 
 ### 修复
 
@@ -277,6 +288,22 @@
   推出来死在哪儿）。现在每一段进入前打一行 `--- 采集进度: ② … ---`，
   日志里最后一条就是断点；`runexe` 也改成失败时**打一行可见输出**而不是让 `set -e`
   把整步带走。
+- **④c 探针把证据包作业自己弄红了一整轮（run #26）：配置里关着 CLI，却让构建步去编 `bs` 目标**
+  —— `windows-memdump` 的 diag 配置原本是 `-DBATCHSMITH_BUILD_CLI=OFF`，而 CLI 目标由
+  `src/cli` 提供、只在 `BATCHSMITH_BUILD_CLI` 下 `add_subdirectory`（顶层 `CMakeLists.txt:149`）。
+  于是构建步第一句就死在 `ninja: error: unknown target 'bs', did you mean '.'?`，
+  自检/整跑/单跑/WER/转储/摘要**又**一个都没做。改法两处：
+  ① 该配置改成 `BATCHSMITH_BUILD_CLI=ON`（只多编一个 CLI 目标，不改变 core/测试的编译参数，
+  与"红点同配置"这一点无关）；
+  ② 加一道**预检** —— 配置摘要在配置完成那一刻就已经打印了 `GUI=… CLI=… TESTS=…`，
+  所以完全可以在动用构建时间**之前**就断言 `CLI=ON` 并判红。教训一般化成：
+  **这个作业后面每一步要用到的目标/文件，都要在配置步之后先做一次存在性自证。**
+  对应的"交叉一致性"检查也进了 `.workbuddy/tools/ci-patch/verify.py`：
+  单看每一处都写对了、合起来却自相矛盾的那类改动，现在会被本机自检挡下。
+- **转储汇总把"一个转储都没生成"说成"超出 25MB 上限"**：`total -eq 0` 与 `total > 上限`
+  原先共用一句 `else`，给出的是一句**假因果** —— 会把人往"体积"上引，而真因是
+  WER 的 LocalDumps 没生效或进程压根没崩在托管路径上。现在三种情形分开说，
+  0 字节那句直接点名要去查什么。
 - **Git Bash 的 `$?` 有歧义：127 既表示"命令找不到"，也表示"未映射的 NTSTATUS"**。
   本机用"抛出指定异常码的探针"（`.workbuddy/tools/statusprobe/exc.c`）实测：
   `0xC0000374`（堆损坏）→ **127**、`0xC00000FD`（栈溢出）→ **127**、
