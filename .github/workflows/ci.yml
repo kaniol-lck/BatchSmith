@@ -374,9 +374,18 @@ jobs:
   #
   # 与 heapcheck 一样**不影响发布**：只编 core 测试，不打包、不上传产物。
   #
-  # ⚠️ 这个 job 是新增的、还没在 runner 上验证过。构建失败（例如本 runner 上
-  #    /fsanitize=address 不可用）会打一条 ::warning:: 然后**跳过**，不判红 ——
-  #    红色只代表 ASan 抓到了真问题。第一次跑完看一眼那条 warning 在不在。
+  # 这个 job 的**绿色只允许**表示一件事：ASan 真的跑完了、什么都没报。
+  # 配置失败 / 构建失败 / 产物不在 / 测试没跑起来 —— 一律判红，但注解里会写清
+  # "是**本站作业**坏了，不是被测代码有问题"。绿色不该用来掩盖"仪器根本没开机"，
+  # 那正是上面 heapcheck 刚修掉的毛病。
+  #
+  # ⚠️ 一个只在 Windows + bash 下才发作的坑（第一次跑就踩了，见 CHANGELOG）：
+  #    传 `/x/y` 形状的参数给**原生**程序时，Git Bash 会把它当成 POSIX 路径改写掉 ——
+  #    实测 `-DCMAKE_CXX_FLAGS="/fsanitize=address /Zi"` 变成
+  #    `-DCMAKE_CXX_FLAGS=<Git 安装根>/fsanitize=address /Zi`。标志废掉之后
+  #    CMake 连**编译器探测**都过不去，于是死在**配置步**（不是构建步，因为
+  #    CMAKE_CXX_FLAGS 参与探测编译）。仓库里其它 job 传的都是 preset 名，
+  #    没有 `/` 开头的参数，所以这个坑一直没暴露。下面显式关掉路径转换。
   # =========================================================================
   windows-asan:
     name: Windows ASan
@@ -404,22 +413,53 @@ jobs:
 
       # 用显式命令而不是 preset：ASan 需要往 C/CXX/Linker 三处都塞标志，
       # preset 里没有这些开关，塞进去反而让日常构建也带上。
-      #   * BATCHSMITH_LTO=OFF —— ASan 与 LTO 冲突（/GL 会把检查优化掉）
       #   * 关掉 GUI 与 CLI —— 要复现的是 core 测试，少编几分钟
       #   * /Zi —— ASan 报告要印 file:line，需要调试信息
       #   * /INCREMENTAL:NO —— ASan 与增量链接不兼容
+      #   * BATCHSMITH_LTO=OFF —— 注意：**在 MSVC 上本来就是个空开关**
+      #     （CMakeLists 的 LTO 分支写着 `if(BATCHSMITH_LTO AND NOT MSVC)`），
+      #     这里显式关掉只是为了这个作业以后被搬到别的平台时不会踩 ASan×LTO 冲突。
+      #     别在别处说"关掉 LTO 才让 ASan 在 Windows 上能用"—— 那与事实不符。
       - name: 配置（Release + ASan，不含界面）
         shell: bash
+        env:
+          # ⚠️ 必须关掉参数路径转换：否则 `/fsanitize=address` 会被 Git Bash
+          #    当成 POSIX 路径换成 `<Git 安装根>/fsanitize=address`，标志变垃圾，
+          #    配置步直接死（CMake 的编译器探测用 CMAKE_CXX_FLAGS）。
+          #    两个变量分别是 Git for Windows 与 MSYS2 的开关，一起设上。
+          MSYS_NO_PATHCONV: '1'
+          MSYS2_ARG_CONV_EXCL: '*'
         run: |
+          # 取**运行时**环境里的 QT_ROOT_DIR（install-qt-action 通过 GITHUB_ENV 交出来），
+          # 而不是 `${{ env.QT_ROOT_DIR }}` —— 后者是解析期展开，排在安装步骤之前，
+          # 拿不到值就是空串，症状会是一句离根因很远的 find_package(Qt6) 失败。
+          if [ -z "${QT_ROOT_DIR:-}" ]; then
+            echo "::error::ASan 作业的配置步失败：QT_ROOT_DIR 为空（install-qt-action 没交出 Qt 路径）—— 这是**本站作业**的问题，不是被测代码的问题"
+            exit 1
+          fi
+          echo "Qt 前缀: $QT_ROOT_DIR"
+
+          set +e
           cmake -S . -B build/asan -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DBATCHSMITH_BUILD_GUI=OFF \
             -DBATCHSMITH_BUILD_CLI=OFF \
             -DBATCHSMITH_LTO=OFF \
-            -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}" \
+            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR" \
             -DCMAKE_C_FLAGS="/fsanitize=address /Zi" \
             -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" \
-            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO" \
+            > /tmp/configure.log 2>&1
+          code=$?
+          set -e
+
+          if [ "$code" -ne 0 ]; then
+            tail -20 /tmp/configure.log | tr -d '\r' | sed -e 's/%/%25/g' \
+              | while IFS= read -r line; do echo "::warning::$line"; done
+            echo "::error::ASan 作业的**配置步**失败（退出码 $code）—— 这是本站作业的问题（CI 上的标志/工具链变了？），不是被测代码的问题。日志尾部见上面几条 warning"
+            exit 1
+          fi
+          tail -3 /tmp/configure.log | tr -d '\r'
 
       - name: 构建并跑测试（ASan）
         shell: bash
@@ -432,16 +472,17 @@ jobs:
           set -e
 
           if [ "$build_code" -ne 0 ]; then
-            tail -5 /tmp/build.log
-            echo "::warning::ASan 构建失败（多半是本 runner 上 /fsanitize=address 不可用），本 job 本次跳过。日志尾部见上一行；红色应当只代表 ASan 抓到了真问题"
-            exit 0
+            tail -8 /tmp/build.log | tr -d '\r' | sed -e 's/%/%25/g' \
+              | while IFS= read -r line; do echo "::warning::$line"; done
+            echo "::error::ASan 作业的**构建步**失败（退出码 $build_code）—— 这是本站作业的问题（例如本 runner 上 /fsanitize=address 不可用），不是被测代码的问题。日志尾部见上面几条 warning"
+            exit 1
           fi
-          tail -2 /tmp/build.log
+          tail -2 /tmp/build.log | tr -d '\r'
 
           # 同一个教训：这一步也不能"什么都没跑到"还绿着（这正是 heapcheck 原先的毛病）。
           if [ ! -f "$exe" ]; then
-            echo "::warning::构建成功但没找到 $exe（产物路径变了？），本 job 本次跳过"
-            exit 0
+            echo "::error::ASan 构建成功但没找到 $exe（产物路径变了？）—— 本站作业的问题，不是被测代码的问题"
+            exit 1
           fi
 
           # abort_on_error=0：让 ASan 报完继续跑，一次能收齐多处问题；
@@ -469,8 +510,11 @@ jobs:
             exit 1
           fi
 
+          # 与 heapcheck 一样：干净时也留一条**正向**注解。job 日志匿名读不到，
+          # 不带注解只有两种解读 —— "ASan 跑过且干净"和"这一步什么都没跑到"，必须能分开。
           echo "ASan 没有报错（测试退出码 $code）"
           grep -aE 'test cases:|assertions:' /tmp/asan.log | tail -2 | tr -d '\r'
+          echo "::warning::ASan 小结：未报告内存错误；$(grep -aE 'test cases:' /tmp/asan.log | tail -1 | tr -d '\r')"
 
   # =========================================================================
   # 代码格式

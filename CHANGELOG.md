@@ -201,8 +201,11 @@
   `HeapValidate` 也照样返回 TRUE）；ASan 给每块分配加红区，并在每次读写上插检查，
   越界与"使用已释放内存"都会**在发生的那一行**报出来，不管落点是不是别人的块。
   用 Release 配置（ASan 要求 `/MD`，与 Debug CRT 不兼容，而 `0xc0000374` 恰好只在
-  Release 出现），并显式关掉 LTO（`/GL` 会把检查优化掉）。构建不出来时只打一条 warning
-  并跳过本次 —— 红色只代表 ASan 抓到了真问题。
+  Release 出现）。`BATCHSMITH_LTO=OFF` 也传了，但**别把它当成在 Windows 上跑通 ASan
+  的条件**：CMakeLists 里的 LTO 分支写着 `if(BATCHSMITH_LTO AND NOT MSVC)`，
+  MSVC 上这个开关本来就是空的。这个作业的**绿色只允许**
+  表示"ASan 真的跑完了、什么都没报"；配置/构建/产物/测试没跑起来一律判红，但注解里
+  写清"是本站作业坏了，不是被测代码有问题" —— 干净的运行另发一条正向注解。
 
 ### 修复
 
@@ -216,6 +219,19 @@
   「工具函数 N 个，分 M 组：…」。这张图最容易在"新增一个函数分组"时漏掉 ——
   分组排在正文里、一屏之外，肉眼比对不出来；有了这行输出，生成截图的人不用看图
   也能确认图上该有的东西在。
+- **Windows ASan 作业死在配置步：Git Bash 把 `/fsanitize=address` 改写成了路径**。
+  新作业第一次跑（run #19）就是红的，而且红在**配置**步、不是构建步 —— 根因是
+  Windows 上 bash 给**原生**程序传 `/x/y` 形状的参数时会做 POSIX→Windows 路径转换：
+  实测 `-DCMAKE_CXX_FLAGS="/fsanitize=address /Zi"` 到手变成
+  `-DCMAKE_CXX_FLAGS=<Git 安装根>/fsanitize=address /Zi`。标志成了垃圾之后，
+  CMake 的**编译器探测**（它用 `CMAKE_CXX_FLAGS`）过不去，于是配置阶段就失败，
+  离根因很远。仓库里其它 job 传的都是 preset 名与 `-D` 开关，没有 `/` 开头的参数值，
+  所以这个坑一直没暴露。修法：配置步显式设 `MSYS_NO_PATHCONV=1` 与
+  `MSYS2_ARG_CONV_EXCL='*'`（两个变量分别是 Git for Windows 与 MSYS2 的开关），
+  并把 `QT_ROOT_DIR` 改成从**运行时**环境取（原先用 `${{ env.QT_ROOT_DIR }}` 是解析期
+  展开，拿不到值只会换来一句离根因很远的 `find_package(Qt6)` 失败）。
+  ⚠️ 本机 `MSYS_NO_PATHCONV` 默认是开着的（WorkBuddy 注入），所以本地根本复现不出来 ——
+  验证只能用"探针程序打印自己的 argv"在**清掉这两个变量**后跑一遍。
 - **`pad` 的「先分配后检查」逃逸面**（ADR-6 逃逸面 1）：`pad(s, width)` 原来是先
   `while` 补到 `width`、**最后**才比对单次字符串上限 —— 等检查生效时内存早就分配出去了，
   `pad('x', 1e15)` 会一路补到把进程撑死，而不是报一句「超过上限」。ADR-6 当初把这一面
