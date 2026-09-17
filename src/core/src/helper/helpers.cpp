@@ -487,10 +487,27 @@ int helper_pad(lua_State* state) {
     const QString fill =
             lua_gettop(state) >= 3 ? require_string(state, 3, "pad") : QStringLiteral(" ");
 
-    QString result = text;
     if (fill.isEmpty()) {
         luaL_error(state, "pad: 填充串不能为空");
     }
+
+    // ADR-6 逃逸面 1（**先分配后检查**）：这里原来是"先 while 补到 width、
+    // 最后才查上限"—— 等检查生效时分配早就发生了：`pad('x', 1e15)` 会一路补到
+    // 把进程撑死，而不是报一句「超过上限」。
+    //
+    // 目标宽度本身受同一个上限约束就够了：结果长度只会是
+    // `max(text.size(), width)`，文本那一路由末尾的检查负责。
+    //
+    // `%I` 是 Lua 自己的整型格式符（取 `lua_Integer`）。不用 `%d` + `static_cast<int>`：
+    // 宽度可以远大于 int，截断后消息里会印出一个跟用户输入毫无关系的数字。
+    if (width > max_string_bytes(state)) {
+        luaL_error(state,
+                   "pad: 目标宽度 %I 超过单次字符串上限（%I）",
+                   static_cast<lua_Integer>(width),
+                   static_cast<lua_Integer>(max_string_bytes(state)));
+    }
+
+    QString result = text;
     // 右侧补齐；不足一个填充串宽度时按其前缀补
     while (result.size() < width) {
         const qsizetype need = width - result.size();

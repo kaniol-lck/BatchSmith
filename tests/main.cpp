@@ -34,15 +34,37 @@
 /// 当前进程的堆是否还自洽。
 ///
 /// - MSVC 的 Debug 构建：走 CRT 调试堆的校验。它有**守卫字节**（每块分配前后各一段），
-///   越界写会被当场指出来 —— 这是最强的检查，但也只有 Debug 构建才有。
-/// - 其余 Windows 构建（含 MinGW 复现本问题时用的那些）：走 `HeapValidate`，
-///   它只能查出堆的**结构**已经被破坏（块头/链表坏了），查不出"写到了别人的空闲
-///   空间里"这种还没致伤的越界。聊胜于无：真出问题时这已经足够把范围缩小。
+///   越界写会被当场指出来 —— 这是最强的那一路，也确实只有 Debug 构建才有。
+/// - 其余 Windows 构建（含 MinGW 复现本问题时用的那些）：只能走 `HeapValidate`，
+///   它只查堆的**结构**（块头/空闲链表），查不出"写到了别人的空闲空间里"这种还没致伤的越界。
+///
+/// ⚠️ **必须校验正确的堆**：`/MD` 的 UCRT 与 MinGW 用的 msvcrt 都**有自己的私有堆**，
+/// `malloc`/`free` 走的是它；`GetProcessHeap()` 只是进程默认堆。原先这里传的就是
+/// `GetProcessHeap()` —— 于是"每个用例之后校验堆"在 Release 上是**空转**的：
+/// CI 的 Windows x64 作业从没打印过一条 `[heap]` 行，**不是堆干净，是没检查到对的堆**。
+/// 改成枚举进程内所有堆（`GetProcessHeaps`），CRT 的私有堆就在其中。
+///
+/// ⚠️ 但别指望它：本机实测（`.workbuddy/tools/heap-probe/heap_probe.c`）连**故意踩坏块头**
+/// 都照样让 `HeapValidate` 返回 TRUE（现代堆默认启用 LFH，全量校验基本失效）。
+/// 所以"没打印 `[heap]`"**不等于**"堆是干净的"。要拿到真正的证据只有两条路：
+/// Debug 的 CRT 调试堆（本文件上面那一路），或 ASan / PageHeap（见 ci.yml 的诊断作业）。
 [[nodiscard]] bool heap_is_consistent() {
 #if defined(_MSC_VER) && defined(_DEBUG)
     return _CrtCheckMemory() != FALSE;
 #else
-    return HeapValidate(GetProcessHeap(), 0, nullptr) != FALSE;
+    constexpr DWORD kMaxHeaps = 64;
+    HANDLE heaps[kMaxHeaps];
+    const DWORD count = GetProcessHeaps(kMaxHeaps, heaps);
+    if (count == 0) {
+        return true;  // 拿不到堆列表（不该发生）：宁可不误报
+    }
+    // count > kMaxHeaps 时数组只被填了前 kMaxHeaps 个，必须夹住上界
+    for (DWORD i = 0; i < count && i < kMaxHeaps; ++i) {
+        if (HeapValidate(heaps[i], 0, nullptr) == FALSE) {
+            return false;
+        }
+    }
+    return true;
 #endif
 }
 

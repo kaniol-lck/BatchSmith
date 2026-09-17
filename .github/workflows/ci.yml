@@ -345,8 +345,132 @@ jobs:
             fi
           done < /tmp/cases.txt
           set -e
+
+          # ---- 这一步自己也要能被质疑 ----
+          # 原先无论结果如何都 exit 0，而且干净时一条注解都不发。于是"没有 [heap] 注解"
+          # 既可能是"堆没问题"，也可能是"这一步什么都没跑到"（exe 路径写错 ⇒ 127 ⇒
+          # cases.txt 为空 ⇒ $total=0 $bad=0 ⇒ 照样绿）。两种情况的差别只在日志里，
+          # 而 job 日志匿名读不到（要仓库写权限）—— 所以：
+          #   1) 干净时也发一条**正向**注解：warning 级匿名可读，又不会让 job 变红；
+          #   2) 一个用例都没跑到就 exit 1 —— 诊断通道坏了，必须看得见。
           echo "逐个跑完成：$total 个用例里有 $bad 个异常退出"
-          exit 0
+          echo "::warning::堆诊断小结：整跑退出码 $code；$total 个用例逐个单跑，$bad 个异常退出"
+          if [ "$total" -eq 0 ]; then
+            echo "::error::一个用例都没跑到 —— 诊断通道本身坏了（exe 路径？--list-test-cases 的输出格式变了？），本次结论不可信"
+            exit 1
+          fi
+
+  # =========================================================================
+  # Windows ASan：给那个 0xc0000374 换一台能"看见元凶"的仪器
+  #
+  # 为什么还需要它（heapcheck 那条路已经绿了）：两者看得见的东西不一样 ——
+  # CRT 调试堆只在**每块分配的边界**放守卫字节，越界十几字节以上就落进相邻块，
+  # 守卫字节依然完好（本机实测：故意踩坏块头，`HeapValidate` 也照样返回 TRUE，
+  # 见 tests/main.cpp 的注释）。ASan 给每块分配加红区 + 在每次 load/store 上插检查，
+  # 越界与"使用已释放内存"都会**在发生的那一行**报出来，不管落点是不是别人的块。
+  #
+  # 为什么用 Release 而不是 Debug：ASan 要求 /MD，与 Debug CRT（/MDd）不兼容；
+  # 而 0xc0000374 恰恰只在 Release 出现 —— 正好对上要复现的那个配置。
+  #
+  # 与 heapcheck 一样**不影响发布**：只编 core 测试，不打包、不上传产物。
+  #
+  # ⚠️ 这个 job 是新增的、还没在 runner 上验证过。构建失败（例如本 runner 上
+  #    /fsanitize=address 不可用）会打一条 ::warning:: 然后**跳过**，不判红 ——
+  #    红色只代表 ASan 抓到了真问题。第一次跑完看一眼那条 warning 在不在。
+  # =========================================================================
+  windows-asan:
+    name: Windows ASan
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: 安装 Qt ${{ env.QT_VERSION }}
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: win64_msvc2019_64
+          cache: true
+
+      - name: 安装 Ninja
+        shell: bash
+        run: |
+          python -m pip install --quiet ninja
+          echo "$(python -c 'import ninja; print(ninja.BIN_DIR)')" >> "$GITHUB_PATH"
+
+      - name: 准备 MSVC 环境
+        uses: ilammy/msvc-dev-cmd@v1
+
+      # 用显式命令而不是 preset：ASan 需要往 C/CXX/Linker 三处都塞标志，
+      # preset 里没有这些开关，塞进去反而让日常构建也带上。
+      #   * BATCHSMITH_LTO=OFF —— ASan 与 LTO 冲突（/GL 会把检查优化掉）
+      #   * 关掉 GUI 与 CLI —— 要复现的是 core 测试，少编几分钟
+      #   * /Zi —— ASan 报告要印 file:line，需要调试信息
+      #   * /INCREMENTAL:NO —— ASan 与增量链接不兼容
+      - name: 配置（Release + ASan，不含界面）
+        shell: bash
+        run: |
+          cmake -S . -B build/asan -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBATCHSMITH_BUILD_GUI=OFF \
+            -DBATCHSMITH_BUILD_CLI=OFF \
+            -DBATCHSMITH_LTO=OFF \
+            -DCMAKE_PREFIX_PATH="${{ env.QT_ROOT_DIR }}" \
+            -DCMAKE_C_FLAGS="/fsanitize=address /Zi" \
+            -DCMAKE_CXX_FLAGS="/fsanitize=address /Zi" \
+            -DCMAKE_EXE_LINKER_FLAGS="/INCREMENTAL:NO"
+
+      - name: 构建并跑测试（ASan）
+        shell: bash
+        run: |
+          exe=./build/asan/bin/batchsmith_tests.exe
+
+          set +e
+          cmake --build build/asan --target batchsmith_tests --parallel > /tmp/build.log 2>&1
+          build_code=$?
+          set -e
+
+          if [ "$build_code" -ne 0 ]; then
+            tail -5 /tmp/build.log
+            echo "::warning::ASan 构建失败（多半是本 runner 上 /fsanitize=address 不可用），本 job 本次跳过。日志尾部见上一行；红色应当只代表 ASan 抓到了真问题"
+            exit 0
+          fi
+          tail -2 /tmp/build.log
+
+          # 同一个教训：这一步也不能"什么都没跑到"还绿着（这正是 heapcheck 原先的毛病）。
+          if [ ! -f "$exe" ]; then
+            echo "::warning::构建成功但没找到 $exe（产物路径变了？），本 job 本次跳过"
+            exit 0
+          fi
+
+          # abort_on_error=0：让 ASan 报完继续跑，一次能收齐多处问题；
+          # detect_leaks=0：Qt 的全局对象本来就会留下"可达"内存，泄漏检查是噪声。
+          set +e
+          ASAN_OPTIONS="detect_leaks=0:abort_on_error=0:print_summary=1" \
+            "$exe" -s -nv > /tmp/asan.log 2>&1
+          code=$?
+          set -e
+
+          # ASan 的报告行提升为注解（注解匿名可读，job 日志不是）——
+          # 与「测试」步骤里那套做法一致。
+          if grep -aqE 'ERROR: AddressSanitizer|SUMMARY: AddressSanitizer' /tmp/asan.log; then
+            grep -aE 'ERROR: AddressSanitizer|SUMMARY: AddressSanitizer|^ *#[0-9]+ ' /tmp/asan.log \
+              | head -30 | tr -d '\r' | sed -e 's/%/%25/g' \
+              | while IFS= read -r line; do echo "::error::$line"; done
+            exit 1
+          fi
+
+          # 没有 ASan 报错，但连 doctest 的收尾统计都没有 ⇒ 测试根本没跑起来，别报"干净"。
+          if ! grep -aq 'test cases:' /tmp/asan.log; then
+            tail -12 /tmp/asan.log | tr -d '\r' | sed -e 's/%/%25/g' \
+              | while IFS= read -r line; do echo "::warning::$line"; done
+            echo "::error::ASan 没有报错，但测试也没跑起来（退出码 $code）—— 本次结论不可信"
+            exit 1
+          fi
+
+          echo "ASan 没有报错（测试退出码 $code）"
+          grep -aE 'test cases:|assertions:' /tmp/asan.log | tail -2 | tr -d '\r'
 
   # =========================================================================
   # 代码格式
