@@ -113,7 +113,7 @@ public:
 
     [[nodiscard]] QString violation_message() const { return m_violation_message; }
 
-    /// 诊断用：把 `m_violation_message` 的**数据块所在页的性质**打到 stderr。
+    /// 诊断用：把任意一个 `QString` 的**数据块页面性质 + 头部字段 + 堆归属**打到 stderr。
     ///
     /// 为什么需要它（run #32 的现场）：崩溃点是 Qt 的 `QString` 拷贝构造里对源对象
     /// 的 `d` 做引用计数自增（`lock xadd`），源对象正是 `m_violation_message`，
@@ -121,12 +121,21 @@ public:
     /// 「指令数超过上限（20000000）」的长度）—— 只有 `d` 所在的页是
     /// **已保留但未提交**，于是那句 `lock xadd` 当场 AV。
     /// 也就是说：不是因为对象被踩坏，而是**它指向的内存已经不属于我们了**。
-    /// 那么问题只剩一个 —— **是在 `raise()` 赋值时就坏的，还是之后被释放的？**
-    /// 在"注入列表之后 / raise 赋值之后 / 拷贝之前"各打一个点，一次就能二分出来。
+    ///
+    /// run #33 进一步把区间缩到了「`raise()` 之内是好的、`raise()` 返回之后就是坏的」，
+    /// 但同时暴露了一个自相矛盾：同一行里既报「已保留」又成功读出了长度。
+    /// 本机实测（`.workbuddy/tools/pageprobe/`）确认「已保留 = 读写都当场 AV」，
+    /// 所以那个"长度"不可能真是读出来的 —— 于是这个探针改成：
+    ///   ① **先判可读、再读**，读不动就明说「读不动」，绝不越过这一步；
+    ///   ② 长度取自**头部字节**（`ref/size/flags`），不再经 `QString::size()`；
+    ///   ③ 加 `HeapSize` 交叉验证（遍历所有堆），它和 `VirtualQuery` 是两条独立的证据链。
     ///
     /// ⚠️ 只在诊断构建里有实现（`BATCHSMITH_MESSAGE_TRACE`），且还要环境变量
     /// `BATCHSMITH_MESSAGE_TRACE=1` 才真的打印 —— 否则同一次构建里的单元测试
     /// 会被这条探针刷屏。非诊断构建下是空调用，零开销。
+    void trace_message(const char* where, const char* label, const QString& value) const;
+
+    /// 同上，专门看 `m_violation_message`。
     void trace_violation_message(const char* where) const;
 
     void clear_violation();

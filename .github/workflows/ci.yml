@@ -997,18 +997,19 @@ jobs:
             fi
             head -60 "$bundle/run-cli-abort.txt" | tr -d '\r' || true
 
-            # 探针自证：本轮的全部价值就在这三行上 —— 它们把「消息的数据块从哪一步起
-            # 变成不可写的」切成三段（注入列表之后 → raise 赋值之后 → 拷贝之前）。
+            # 探针自证：本轮的全部价值就在这几行上 —— 它们把「消息的数据块从哪一步起
+            # 变成不可访问的」切成若干段（注入列表之后 → raise 赋值之前 → raise 赋值之后 →
+            # limit_hook 里 raise 返回之后 → 中止分支拷贝之前）。
             # 缺一行，二分的区间就断在那里；**一行都没有**更坏：探针在关掉时是空实现，
             # 日志看起来照样正常，于是"探针没说话"极易被误读成"消息一直是好的"。
             probes=$(grep -ac '^\[batchsmith\] 探针 ' "$bundle/run-cli-abort.txt" || true)
             if [ "${probes:-0}" -eq 0 ]; then
               echo "::error::④c 一行探针都没有 ⇒ BATCHSMITH_MESSAGE_TRACE 没生效（本站作业的问题），本轮定不了「哪一步丢的消息」"
             else
-              echo "--- 探针（共 $probes 行，期望 3 行）---"
+              echo "--- 探针（共 $probes 行，期望 ≥ 6 行）---"
               grep -a '^\[batchsmith\] 探针 ' "$bundle/run-cli-abort.txt" | tr -d '\r' || true
-              if [ "$probes" -lt 3 ]; then
-                echo "::warning::探针只打出 $probes 行（期望 3）⇒ 二分的区间不完整：看它停在哪一步之前"
+              if [ "$probes" -lt 6 ]; then
+                echo "::warning::探针只打出 $probes 行（期望 ≥ 6）⇒ 二分的区间不完整：看它停在哪一步之前"
               fi
             fi
           else
@@ -1095,14 +1096,21 @@ jobs:
             echo "== 出错指令与调用链（④c：CLI 的 VEH 自报 —— **本轮的正主**）=="
             echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）、调用链 ${frames_selftest:-?} 帧（应 ≥ 3）、寄存器行 ${regs_selftest:-?} 条（应 ≥ 1）"
             head -60 "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
-            echo "消息追踪探针: ${probes:-0} 行（期望 3）"
+            echo "消息追踪探针: ${probes:-0} 行（期望 ≥ 6）"
             echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
             head -60 "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
-            echo "→ 探针三行按时间顺序是「注入列表之后 / raise 赋值之后 / 拷贝之前」，"
-            echo "  把「消息的数据块从哪一步起变成不可写」切成三段 —— 第一行报「已保留/空闲」的地方就是凶手所在。"
-            echo "  判据：`长度=` 一路都是 17（消息文本没变）而页性质从「已提交」翻成「已保留/空闲」，"
-            echo "  说明对象自洽但底层内存已被释放 ⇒ 提前释放（谁 free 的看第三步）；"
-            echo "  若某步的 `头部=` 与上一行不同，说明是**换了一块内存**，那是另一类问题。"
+            echo "→ 每行格式：[batchsmith] 探针 <时点> / <看的是谁>：数据=<指针>（页性质） 头部[ref/size/flags] HeapSize..."
+            echo "  时点按时间顺序：注入列表之后 → raise 赋值之前(参数) → raise 赋值之后(参数/成员)"
+            echo "                  → limit_hook：raise 返回之后(成员) → 中止分支：拷贝之前(成员)"
+            echo "  判据（引用计数这一列是关键）："
+            echo "    * raise 赋值之前 参数 ref=1，赋值之后 参数与成员 ref=2 且指针相同 ⇒ 引用计数算对了；"
+            echo "      若赋值之后仍是 ref=1 ⇒ 「这次赋值没自增」，临时析构会把块减到 0 并释放 —— 凶手即此处。"
+            echo "    * 页性质从「已提交/私有/读写」翻成「已保留/空闲」的那一步就是释放发生的区间；"
+            echo "      ⚠️ 本机实测（.workbuddy/tools/pageprobe/）：「已保留」= 读写都当场 AV，"
+            echo "      所以「已保留」与「成功读出内容」不可能同时为真 —— 一行里若两者并现，"
+            echo "      说明那个「读出来的值」根本不是读出来的，别采信。"
+            echo "    * 「HeapSize 在 N 个堆里都不认它」是与 VirtualQuery **独立**的第二条证据："
+            echo "      两者都指向「已释放」才敢下结论；若二者打架，是我们对其中一个的理解错了。"
             echo "→ 出错位置写成了「模块名 + 0xRVA」，run #28 实测它**不一定是 bs.exe**。"
             echo "  属于 bs.exe 的帧配证据包里的 bs.map 翻函数名："
             echo "  .workbuddy/tools/ciwatch/symbolicate.py bs.map <RVA>"

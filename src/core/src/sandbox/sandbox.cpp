@@ -251,6 +251,12 @@ void limit_hook(lua_State* state, lua_Debug* /*debug*/) {
         sandbox->raise(
                 Violation::Instructions,
                 QStringLiteral("指令数超过上限（%1）").arg(sandbox->limits().max_instructions));
+        // 诊断分界点：此刻 `raise()` 已经返回 ⇒ 上面那个 `.arg()` 临时对象**已经析构**
+        // （临时绑定到 `const QString&` 参数，生命周期到调用它的那条完整表达式结束），
+        // 而 Lua 的错误传播还没开始。所以这一行正好把两种可能切成两半：
+        //   * 到这里就「已保留」⇒ 释放发生在临时析构 ⇒ 赋值时引用计数少算了一次；
+        //   * 到这里还好、只有后面才坏 ⇒ 凶手在 Lua 错误传播那条路上。
+        sandbox->trace_violation_message("limit_hook：raise 返回之后");
         luaL_error(state, "sandbox aborted: instruction limit exceeded");
         return;
     }
@@ -416,8 +422,15 @@ qsizetype Sandbox::elapsed_ms() const {
 
 void Sandbox::raise(Violation kind, const QString& message) {
     if (m_violation == Violation::None) {
+        // 诊断探针（借用一下，不额外开接口）：赋值**之前**看一次参数、赋值**之后**看一次。
+        // 期望值很明确 —— 赋值前参数 ref 应为 1（`.arg()` 造出来的独立块），
+        // 赋值后参数与成员**共享**同一块、ref 应为 2。
+        // 若赋值后 ref 仍是 1，就是"这次赋值没有自增引用计数"，
+        // 那么调用方的临时对象析构时会把它减到 0 并释放 —— 后面那次拷贝自然 AV。
+        trace_message("raise 赋值之前", "参数", message);
         m_violation = kind;
         m_violation_message = message;
+        trace_message("raise 赋值之后", "参数", message);
         trace_violation_message("raise 赋值之后");
     }
 }
@@ -497,43 +510,145 @@ void describe_page(const void* address, char* out, std::size_t out_size) {
 
 }  // namespace
 
-void Sandbox::trace_violation_message(const char* where) const {
+/// 读 16 字节的 `QArrayData` 头（ref / size / flags），**不经过 `QString::size()`**。
+///
+/// 为什么不直接用 `size()`：run #33 的探针出现过一个自相矛盾的现象 ——
+/// 同一行里既报「已保留」（按本机实测：已保留 = 读写都当场 AV），又成功读出了长度。
+/// 只要长度是"经 `QString` 读出来的"，就永远说不清它到底有没有真读内存。
+/// 所以这里直接读头部字节：读不动就说读不动，读到什么就报什么。
+///
+/// ⚠️ 读之前**必须先过 `page_readable()`**：探针在 VEH 之前跑，自己踩上去会把
+/// 现场弄丢（而且崩点会变成探针的地址，把真正的凶手遮掉）。
+struct HeaderWords {
+    bool readable = false;
+    int ref = 0;
+    int size = 0;
+    unsigned flags = 0;
+};
+
+bool page_readable(const void* address) {
+    if (address == nullptr) {
+        return false;
+    }
+    MEMORY_BASIC_INFORMATION mbi;
+    std::memset(&mbi, 0, sizeof(mbi));
+    if (::VirtualQuery(address, &mbi, sizeof(mbi)) == 0) {
+        return false;
+    }
+    if (mbi.State != MEM_COMMIT) {
+        return false;
+    }
+    if ((mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) != 0) {
+        return false;
+    }
+    return true;
+}
+
+/// Qt6 的 `QArrayData` 布局：`ref`(4) + `size`(4) + `alloc:31/capacityReserved:1`(4) + 填充(4)，
+/// 然后是 `offset`（8 字节，实测为 16 ⇒ `数据指针 = 头部 + 16`）。
+HeaderWords read_header(const QChar* data) {
+    HeaderWords words;
+    if (data == nullptr) {
+        return words;
+    }
+    const char* raw = reinterpret_cast<const char*>(data) - 16;
+    if (!page_readable(raw) || !page_readable(raw + 15)) {
+        return words;  // readable 保持 false：**绝不越过这一步去读**
+    }
+    int fields[3] = {0, 0, 0};
+    std::memcpy(fields, raw, sizeof(fields));
+    words.ref = fields[0];
+    words.size = fields[1];
+    words.flags = static_cast<unsigned>(fields[2]);
+    words.readable = true;
+    return words;
+}
+
+/// 与 `VirtualQuery` **互相独立**的取证：这块内存现在还算不算堆里"已分配"的块。
+///
+/// 为什么要两个独立仪器：run #32/#33 的结论一直建立在"页状态 = 已保留 ⇒ 内存被释放"这一条
+/// 推理链上，而这条链只有 VirtualQuery 一个证据源。`HeapSize` 走的是堆自己的结构：
+/// 若它在**所有**堆里都返回 `(SIZE_T)-1`，说明这块地址已经不属于任何已分配的块 ——
+/// 与 VirtualQuery 的结论互为交叉验证；两者若打架，那就说明我们对其中一个的理解错了。
+struct HeapWords {
+    unsigned heaps = 0;
+    int owner = -1;
+    std::size_t block_size = 0;
+};
+
+HeapWords heap_lookup(const void* address) {
+    HeapWords result;
+    if (address == nullptr) {
+        return result;
+    }
+    HANDLE heaps[64];
+    const DWORD count = ::GetProcessHeaps(64, heaps);
+    result.heaps = static_cast<unsigned>(count);
+    for (DWORD i = 0; i < count; ++i) {
+        const SIZE_T size = ::HeapSize(heaps[i], 0, address);
+        if (size != static_cast<SIZE_T>(-1)) {
+            result.owner = static_cast<int>(i);
+            result.block_size = static_cast<std::size_t>(size);
+            break;
+        }
+    }
+    return result;
+}
+
+void Sandbox::trace_message(const char* where, const char* label, const QString& value) const {
     if (!message_trace_on()) {
         return;
     }
-    // ⚠️ 探针里**不能**写 `const QString copy = m_violation_message;` —— 探针自己就会做一次
-    //    引用计数自增，万一消息已经悬垂，它就会**抢在真正的位置之前崩掉**，
-    //    于是"崩在探针里"看起来像"探针有问题"，最该看的那条信息反而丢了。
-    //    所以这里只读指针与长度，全程不碰引用计数。
-    const QChar* data = m_violation_message.constData();
-    // Qt6 的 QArrayData 头是 16 字节、QChar 是 2 字节 ⇒ 头部指针 = data - 8（个 QChar）。
-    // 这个布局由崩溃自报的实测独立确认过：`ptr == d + 0x10`。
-    const void* header = data != nullptr ? static_cast<const void*>(data - 8) : nullptr;
-    char data_page[80];
-    char header_page[80];
-    describe_page(data, data_page, sizeof(data_page));
-    describe_page(header, header_page, sizeof(header_page));
-    static const void* previous = nullptr;
-    const char* moved = "首见";
-    if (data != nullptr && previous == data) {
-        moved = "未变";
-    } else if (previous != nullptr) {
-        moved = "**变了**";
+    // ⚠️ 全程不拷贝 `value`：拷贝正是我们要观察的那次引用计数自增，
+    //    消息真悬垂时探针就会抢在真正的位置之前崩掉，把最该看的信息顶掉。
+    const QChar* data = value.constData();
+    char page[80];
+    describe_page(data, page, sizeof(page));
+    const HeaderWords words = read_header(data);
+    const HeapWords heap = heap_lookup(data);
+
+    char header[160];
+    if (words.readable) {
+        std::snprintf(header,
+                      sizeof(header),
+                      "ref=%d size=%d flags=0x%08X",
+                      words.ref,
+                      words.size,
+                      words.flags);
+    } else {
+        std::snprintf(header, sizeof(header), "读不动（页不可读）");
     }
-    previous = data;
+    char heap_text[120];
+    if (heap.owner >= 0) {
+        std::snprintf(heap_text,
+                      sizeof(heap_text),
+                      "HeapSize 命中 heap#%d 块=%zu 字节",
+                      heap.owner,
+                      heap.block_size);
+    } else {
+        std::snprintf(heap_text,
+                      sizeof(heap_text),
+                      "HeapSize 在 %u 个堆里都不认它（不是已分配的块）",
+                      heap.heaps);
+    }
     std::fprintf(stderr,
-                 "[batchsmith] 探针 %s：数据=%p（%s） 头部=%p（%s） 长度=%lld 指针%s\n",
+                 "[batchsmith] 探针 %s / %s：数据=%p（%s） 头部[%s] %s\n",
                  where,
+                 label,
                  static_cast<const void*>(data),
-                 data_page,
+                 page,
                  header,
-                 header_page,
-                 static_cast<long long>(m_violation_message.size()),
-                 moved);
+                 heap_text);
     std::fflush(stderr);
 }
 
+void Sandbox::trace_violation_message(const char* where) const {
+    trace_message(where, "成员", m_violation_message);
+}
+
 #else
+
+void Sandbox::trace_message(const char*, const char*, const QString&) const {}
 
 void Sandbox::trace_violation_message(const char*) const {}
 
