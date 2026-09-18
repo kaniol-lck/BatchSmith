@@ -173,6 +173,112 @@ jobs:
             exit 1
           fi
 
+      # ---------------------------------------------------------------------
+      # 诊断矩阵：**到底是哪一个诊断开关把红点遮住的**
+      #
+      # 为什么放在**这个**作业里：红点只在这里复现。`windows-memdump` 那份诊断构建
+      # （`-DBATCHSMITH_MESSAGE_TRACE=ON -DBATCHSMITH_CRASH_REPORT=ON -DBATCHSMITH_BUILD_GUI=OFF`）
+      # 在**普通堆**下跑同一批用例是 `155 passed | 0 failed`（run #39 实测），
+      # 而这里 `--preset ci` 那份稳定 `Exit code 0xc0000374`（run #37 / #39 都是）。
+      # 两边只差三个开关 ⇒ 拿**同一台机器、同一个作业、同一个 ctest**去逐个加上去，
+      # 才能把"是某个开关遮住了"与"是那个作业的环境不一样"分开。
+      #
+      # 为什么只在这三处：`BATCHSMITH_STRICT` 在 MSVC 上只打一行提示、**不改编译参数**
+      # （顶层 CMakeLists:91 只在 GNU 上加 `-Werror`）；`BATCHSMITH_LTO` 被
+      # `AND NOT MSVC` 排除；`CRASH_REPORT` 的实现（`src/cli/src/crash_report.cpp`）
+      # **只编进 CLI**，而 `batchsmith_tests` 只链 core ⇒ 它对测试二进制本应是**空操作**。
+      # 后两条恰好是最好的**阴性对照**：它们必须"什么都不改变"。若它们也把红点变绿了，
+      # 就说明结论不是"某个开关遮住了"，而是"在这台机器上每次构建都是掷骰子"。
+      #
+      # 判据用**日志内容**而不是退出码：bash 对无法映射到信号的 NTSTATUS 一律报 127
+      # （0xc0000374 与"命令找不到"同码），所以只看"这一跑有没有打完"——
+      # doctest 正常跑完一定会打 `test cases: 155`，崩了就一定没有。
+      - name: 诊断矩阵（哪一个开关遮住了红点）
+        if: runner.os == 'Windows'
+        shell: bash
+        # 这是诊断步：它的结论是"哪个变体红/绿"，不是"CI 该不该红"
+        continue-on-error: true
+        run: |
+          set -uo pipefail
+          # `mark` 只在「内存证据包」那个作业里定义过，本作业没有 —— 自带一个
+          step_mark() { echo "--- 诊断矩阵: $* ---"; }
+          base_exe=build/ci/bin/batchsmith_tests
+          outdir="$RUNNER_TEMP/matrix"
+          mkdir -p "$outdir"
+
+          # 一个变体跑 5 次：既看"红/绿"，也看"红得稳不稳"
+          probe_variant() {  # $1=变体名 $2=exe
+            local name="$1" exe="$2" ok=0 i=1 code last
+            while [ "$i" -le 5 ]; do
+              timeout 300 "$exe" -s -nv > "$outdir/$name-$i.log" 2>&1
+              code=$?
+              last=$(grep -a '^TEST CASE:' "$outdir/$name-$i.log" | tail -1 | sed 's/^TEST CASE:[[:space:]]*//' || true)
+              if grep -qa 'test cases:' "$outdir/$name-$i.log"; then
+                ok=$((ok + 1))
+                echo "矩阵 · $name#$i 退出码=$code 跑完=是 最后用例=${last:-无}"
+              else
+                echo "矩阵 · $name#$i 退出码=$code 跑完=**否（崩了）** 崩溃前最后用例=${last:-无}"
+              fi
+              i=$((i + 1))
+            done
+            eval "done_${name}=$ok"
+            echo "矩阵 · $name 汇总：5 次里跑完 $ok 次"
+          }
+
+          # 自证（这一道是本项目反复换来的）：变体 exe 必须真的存在且非空，
+          # 否则"跑完 0 次"会被读成"红"，而它同样可能只是"根本没构建出 exe"。
+          variant_exe() {  # $1=变体名 $2=extra cmake 参数（可空）
+            local name="$1" extra="$2"
+            # shellcheck disable=SC2086
+            if ! cmake --preset ci -B "build/$name" $extra > "$outdir/$name-configure.log" 2>&1; then
+              echo "::error::矩阵：$name 配置失败 ⇒ 这个变体的结论作废（看下面的尾部）"
+              tail -5 "$outdir/$name-configure.log" | while IFS= read -r l; do echo "::warning::$l"; done
+              return 1
+            fi
+            if ! cmake --build "build/$name" --target batchsmith_tests --parallel > "$outdir/$name-build.log" 2>&1; then
+              echo "::error::矩阵：$name 构建失败 ⇒ 这个变体的结论作废"
+              tail -5 "$outdir/$name-build.log" | while IFS= read -r l; do echo "::warning::$l"; done
+              return 1
+            fi
+            local exe="build/$name/bin/batchsmith_tests"
+            if [ ! -s "$exe" ]; then
+              echo "::error::矩阵：$name 没有产出 $exe（或 0 字节）⇒ 这个变体的结论作废"
+              return 1
+            fi
+            echo "矩阵 · $name 产出 $(stat -c%s "$exe") 字节"
+            probe_variant "$name" "$exe"
+          }
+
+          step_mark "④d 基线：原样的 --preset ci（红点本体）"
+          # 基线 exe 也要自证：它不存在时 probe_variant 会把每一跑都判成"崩了"，
+          # 于是"V0 = 0/5 跑完"看起来像"红点复现"，其实只是路径写错了。
+          if [ ! -s "$base_exe" ]; then
+            echo "::error::矩阵：V0 的 exe 不在（$base_exe）⇒ 基线没有意义，本步结论作废"
+          else
+            probe_variant V0 "$base_exe"
+          fi
+
+          step_mark "④d V1：只加 -DBATCHSMITH_MESSAGE_TRACE=ON（探针/看门狗代码）"
+          variant_exe V1 "-DBATCHSMITH_MESSAGE_TRACE=ON" || true
+
+          step_mark "④d V2：只加 -DBATCHSMITH_CRASH_REPORT=ON（对测试二进制应为空操作）"
+          variant_exe V2 "-DBATCHSMITH_CRASH_REPORT=ON" || true
+
+          step_mark "④d V3：只加 -DBATCHSMITH_BUILD_GUI=OFF（少编一个 GUI 目标）"
+          variant_exe V3 "-DBATCHSMITH_BUILD_GUI=OFF" || true
+
+          echo "===== 诊断矩阵汇总（跑完次数 / 5）====="
+          echo "  V0 --preset ci 原样            : ${done_V0:-未跑}"
+          echo "  V1 + MESSAGE_TRACE=ON          : ${done_V1:-未跑}"
+          echo "  V2 + CRASH_REPORT=ON           : ${done_V2:-未跑}"
+          echo "  V3 + BUILD_GUI=OFF             : ${done_V3:-未跑}"
+          # 注解是 job 日志匿名读不到时唯一的通道
+          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}"
+          echo "  读法：V1 若 =5 而 V0/V2/V3 都 <5 ⇒ **就是那几行探针代码把红点遮住了**（编译期效应），"
+          echo "        那么后续仪器必须搬出 core（放进测试可执行文件或独立进程），否则永远看不到它；"
+          echo "        V2/V3 若也 =5 ⇒ 阴性对照失效，这台机器上每次构建的堆布局本来就在掷骰子，"
+          echo "        结论要改成「红点是随机的」再重做这一轮。"
+
       # CHM 帮助手册（Windows 原生帮助格式：双击即看、带左侧目录树）
       #
       # 放在「打包」之前，这样 package-windows.sh 会把它一起打进 zip。
