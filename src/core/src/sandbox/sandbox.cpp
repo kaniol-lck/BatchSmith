@@ -564,36 +564,32 @@ HeaderWords read_header(const QChar* data) {
     return words;
 }
 
-/// 与 `VirtualQuery` **互相独立**的取证：这块内存现在还算不算堆里"已分配"的块。
+/// 与 `VirtualQuery` **互相独立**的取证 —— ⚠️ **这一条被实测否决了，别再加回来**。
 ///
-/// 为什么要两个独立仪器：run #32/#33 的结论一直建立在"页状态 = 已保留 ⇒ 内存被释放"这一条
-/// 推理链上，而这条链只有 VirtualQuery 一个证据源。`HeapSize` 走的是堆自己的结构：
-/// 若它在**所有**堆里都返回 `(SIZE_T)-1`，说明这块地址已经不属于任何已分配的块 ——
-/// 与 VirtualQuery 的结论互为交叉验证；两者若打架，那就说明我们对其中一个的理解错了。
-struct HeapWords {
-    unsigned heaps = 0;
-    int owner = -1;
-    std::size_t block_size = 0;
-};
-
-HeapWords heap_lookup(const void* address) {
-    HeapWords result;
-    if (address == nullptr) {
-        return result;
-    }
-    HANDLE heaps[64];
-    const DWORD count = ::GetProcessHeaps(64, heaps);
-    result.heaps = static_cast<unsigned>(count);
-    for (DWORD i = 0; i < count; ++i) {
-        const SIZE_T size = ::HeapSize(heaps[i], 0, address);
-        if (size != static_cast<SIZE_T>(-1)) {
-            result.owner = static_cast<int>(i);
-            result.block_size = static_cast<std::size_t>(size);
-            break;
-        }
-    }
-    return result;
-}
+/// 原意：用 `HeapSize` 遍历 `GetProcessHeaps()`，看这块地址还算不算某个堆里"已分配"的块，
+/// 给"已保留 ⇒ 内存被释放"这条只有 `VirtualQuery` 一个证据源的推理链加一条独立证据。
+///
+/// run #34 的实测把它否掉了，而且是**很贵的一次**：那个作业报出
+/// `0xc0000374`（STATUS_HEAP_CORRUPTION），调用链一路翻符号之后是
+/// ```
+/// #6 trace_message +0x35f  ← 崩在这里，反汇编确认是 call HeapSize
+/// #7 Sandbox::raise → #8 limit_hook → luaD_hook → luaV_execute → evaluate_template
+/// ```
+/// 也就是说：**这个"取证工具"自己制造了要取证的那个故障**。原因是我把
+/// `QString` 的**数据指针**（`d + 16`，块内部的地址）交给了 `HeapSize`，而它要的是
+/// **块首**；在这套堆实现下，收到不属于它的指针时它**不是返回 `(SIZE_T)-1`，而是直接抛
+/// 堆损坏**。
+///
+/// ⇒ 教训一：给堆 API 的地址必须是**块首**（对 `QString` 就是 `d` = `data - 16`，
+///    那才是 `malloc` 出来的地址）；教训二：`HeapSize` 不是只读探针，**它会抛**，
+///    所以不能用作"无副作用取证"。
+///    ⚠️ 这条经验与"诊断仪器必须自证"是同一类：**取证工具本身也要先被验收**，
+///    否则它会把自己制造出来的故障当成被测代码的故障，把一整轮结论带偏
+///    （本轮就是——那份 `0xc0000374` 一度看起来像是"终于复现了 CI 的堆损坏"）。
+///
+/// 现在只留 `VirtualQuery` 这一条 —— 它的语义已经在
+/// `.workbuddy/tools/pageprobe/decommit_read.c` 里用 7 种页状态 × 读写实测钉死了
+/// （「已保留」= 读写都当场 AV）。
 
 void Sandbox::trace_message(const char* where, const char* label, const QString& value) const {
     if (!message_trace_on()) {
@@ -605,7 +601,6 @@ void Sandbox::trace_message(const char* where, const char* label, const QString&
     char page[80];
     describe_page(data, page, sizeof(page));
     const HeaderWords words = read_header(data);
-    const HeapWords heap = heap_lookup(data);
 
     char header[160];
     if (words.readable) {
@@ -618,27 +613,13 @@ void Sandbox::trace_message(const char* where, const char* label, const QString&
     } else {
         std::snprintf(header, sizeof(header), "读不动（页不可读）");
     }
-    char heap_text[120];
-    if (heap.owner >= 0) {
-        std::snprintf(heap_text,
-                      sizeof(heap_text),
-                      "HeapSize 命中 heap#%d 块=%zu 字节",
-                      heap.owner,
-                      heap.block_size);
-    } else {
-        std::snprintf(heap_text,
-                      sizeof(heap_text),
-                      "HeapSize 在 %u 个堆里都不认它（不是已分配的块）",
-                      heap.heaps);
-    }
     std::fprintf(stderr,
-                 "[batchsmith] 探针 %s / %s：数据=%p（%s） 头部[%s] %s\n",
+                 "[batchsmith] 探针 %s / %s：数据=%p（%s） 头部[%s]\n",
                  where,
                  label,
                  static_cast<const void*>(data),
                  page,
-                 header,
-                 heap_text);
+                 header);
     std::fflush(stderr);
 }
 
