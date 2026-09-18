@@ -726,6 +726,60 @@
        红点正是从 `box.violation_message()` 拷进 `result.error` 这条路径。
        ⇒ **原始方向（`Sandbox::m_violation_message` 的数据块被多减一次引用）是对的**，
        这一轮把它重新立为第一嫌疑。
+- ⭐⭐⭐⭐⭐⭐⭐⭐ **诊断结论（run #45，`d3fbb5a`，run `35379959869`）：CLI 侧**稳定复现**了红点，
+  并第一次拿到崩溃自报（模块 + RVA + 调用链）——**这是追这个 bug 以来信息量最大的一次。**
+  - 矩阵其余各项与历史逐项一致（V0 0/5、V1 5/5、V2 0/5、V3 0/5，`exitbad_*` 全 0，
+    即**没有一个是"退出时才崩"**；④f 最小不干净前缀 57、④g 最小崩起点 1）⇒ 基线没动。
+  - **`V2-CLI #2/#3 退出码 = 42`**（`--preset ci -DCRASH_REPORT=ON`，**不含** `MESSAGE_TRACE`）。
+    42 是崩溃自报 VEH 接住异常后自退的约定码（打印完 RVA 就 `exit(42)`）⇒
+    **`bs eval` 跑那条中止模板，两次都崩**，且**每次都为 42**（确定性）。
+    `#1`（`$x = 1$`）退出码 1 —— 那条照旧只打一行错误，说明命令行本身是对的。
+  - **崩溃自报原文**（这是历轮一直拿不到的东西）：
+    ```
+    [batchsmith] 崩溃自报（VEH）：异常码 0xc0000374
+      出错指令 : 0x7ffb23717a45
+      所在模块 : ntdll.dll + 0x117a45（外部模块）
+      主模块   : bs.exe 基址 0x7ff7e5da0000
+      调用链：
+        #0..  ntdll.dll        ← 堆校验失败的报告路径（事后）
+        #6  ucrtbase.dll + 0x1e0fb   ← free()
+        #7  bs.exe + 0x1d6ed
+        #8  bs.exe + 0x6f65
+    ```
+    ⇒ `0xc0000374` 是 **NT 堆自己的校验**报出来的（**事后**发现），不是当场 AV；
+    它是从 **`free()`** 这一层往上报的，而调用 `free` 的代码在 **`bs.exe` 自己**里
+    （不是 Qt6Core）⇒ **"某个 QString 的析构 free 掉了一块坏块"。**
+  - **RVA 初步翻译**（拿 CI 上另一处已经带 `/MAP` 的**同级**构建 `bs.exe` + `bs.map` 对，
+    用 `symbolicate.py`）：`0x1d6ed` 落在 **`evaluate_template`**（`engine.cpp.obj`）里、
+    `0x6f65` 落在 **`run_eval`**（`main.cpp.obj`）里 —— 正是 `run_eval → evaluate_template`
+    这条链。再用 `objdump` 反汇编该处并用 `iat.py` 反查它用到的 IAT 槽，得到铁证：
+    ```
+    call *Qt6Core!QString::arg(QString const&, int, QChar)   ← QStringLiteral("已中止：%1").arg(...)
+    call *Qt6Core!QString::operator=(QString&&)
+    call *Qt6Core!QString::~QString()          × 3
+    lock xadd %eax,(%rcx)  ; cmp $1 ; jne …
+    call *api-ms-win-crt-heap-l1-1-0!free                    ← ★ 就在这一片
+    ```
+    ⇒ **崩点确实在"中止分支构造 `result.error` 及其临时 QString 析构"这一小段里**
+    （与 `engine.cpp:169` 一一对应）。**⚠️ 但那份 map 出自同级构建、RVA 约差几十字节，
+    只能算"指向同一片"，不算严格符号化**（V2 与 `build/diag` 的链接开关不同）。
+  - ⚠️ **同时查明"为什么以前从 CLI 看不到它"**：仓库里另一处「CLI 中止路径（PageHeap 下）」
+    探针取自 **`build/diag`**，而 `build/diag` 带 **`-DBATCHSMITH_MESSAGE_TRACE=ON`
+    —— 也就是 run #42 确认的**唯一遮罩**。它配置摘要里就打着 `消息追踪 : ON`。
+    ⇒ **那条探针历史上所有"走到了『已中止』、没 AV"的结论全部作废**，
+    包括 run #38/#39 那次 A/B 40/40 全干净。**run #45 是第一次在无遮罩构建上从 CLI 跑红点模板。**
+- **诊断（run #46 新增）：④h —— 把红点放到**全页堆**下再从 CLI 走一遍。**
+  ④e 拿到的是 `0xc0000374`（**事后**堆校验），位置在 ntdll 里，只说得出"某次 free 了一块坏块"。
+  全页堆（IFEO 的 `GlobalFlag`/`PageHeapFlags`，与 `windows-memdump` 同一套做法）把每个分配
+  放到独立页 + 守卫页，于是两种情况都变成**当场**：
+  越界写 ⇒ 在**写的那条指令**上 AV；坏指针 / 重复 free ⇒ 在**那次 free** 上 AV。
+  自证判据写死了：**异常码必须与 ④e 不同**（关 = `0xc0000374`；开 = `0xc0000005`），
+  两次都一样就说明钩子没装上、这一步作废。
+  - ⚠️ `reg add` 的参数是 `/v /t /d /f` 这种 `/` 开头形状，**必须就地关掉 Git Bash 的
+    参数路径改写**（`MSYS_NO_PATHCONV=1 MSYS2_ARG_CONV_EXCL='*'`），否则 `/v` 被改写成
+    `C:/Program Files/Git/v`，`reg` 静默失败。这里按命令就地设，不动整步环境。
+  - 同时把 ④e 的日志窗口从 24 行放到 **60 行**：崩溃自报连调用链有 20+ 行，
+    只取前 24 行正好把正主截在边界上。
 - **诊断（run #45 新增）：三处改进，都是为了不再指错人 / 不再漏判。**
   1. **CLI 侧改跑红点那条模板**：`cli_probe` 从"只跑 `$x = 1$`"改成**逐条遍历**
      `$x = 1$` / `$(function() while true do end end)()$` / 同一条**再跑一遍**（第三条用来把
