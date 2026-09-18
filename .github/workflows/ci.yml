@@ -308,20 +308,67 @@ jobs:
           step_mark "④e 同一条出错路径的 CLI 侧（bs.exe 带崩溃自报，能给出错指令与调用链）"
           cli_probe V2 || true
 
+          # ④f 前缀扫描：红点要不要靠**前面**的用例"垫"出来？
+          #
+          # run #42 已经给出三条互相咬合的事实：
+          #   ① 红点稳定复现：V0 / V2 / V3 各 **0/5**（每次都崩在同一个用例上）；
+          #   ② **`MESSAGE_TRACE`（唯一改 core 代码的那个开关）是唯一遮罩**：V1 = **5/5** 全干净；
+          #   ③ 同一条出错路径从 **CLI** 走**不崩**（退出码 1，错误信息一字不差：
+          #      `区段 `$x = 1$` 出错：')' expected near '='`）。
+          # ⇒ `describe_error` / `BatchResult::error` 本身没问题；崩的是**已经被踩坏的堆**
+          #   在 free 那一块时被 NT 堆发现。而"往 core 里加仪器"必然改布局 ⇒ **自己把红点遮住**
+          #   （这正是 run #41 预判的分支）。所以这一步**一行代码都不碰**，只用已经构建好的
+          #   `--preset ci` binary 做**前缀扫描**：`--first=1 --last=N`，N 从 1 递增，
+          #   **第一个崩掉的 N** 就是"引入那次踩坏的那条用例"的上界（不崩则说明与顺序无关）。
+          #
+          # 为什么这是当前最划算的一步：**不需要任何新构建**（不受②的遮罩影响），
+          # 每次跑 ~0.6 秒，60 次不到一分钟；而它能直接决定下一步该看哪条用例。
+          prefix_scan() {  # $1=exe $2=最大 N
+            local exe="$1" maxn="$2" n=1 code=0 bad=""
+            while [ "$n" -le "$maxn" ]; do
+              code=0
+              # 与 V0 完全同一种调用方式（`-s -nv`），只多限制用例区间，结论才可比
+              timeout 60 "$exe" --first=1 --last="$n" -s -nv > "$outdir/prefix-$n.log" 2>&1 || code=$?
+              if ! grep -qa 'test cases:' "$outdir/prefix-$n.log"; then
+                bad="$n"
+                echo "矩阵 · ④f 最小崩掉的前缀：--first=1 --last=$n（退出码 $code）"
+                echo "矩阵 · ④f 该前缀里崩前最后一条用例："
+                grep -a '^TEST CASE:' "$outdir/prefix-$n.log" | tail -1 \
+                  | while IFS= read -r l; do echo "  prefix| $l"; done
+                break
+              fi
+              n=$((n + 1))
+            done
+            eval "prefix_first_bad=$bad"
+            if [ -z "$bad" ]; then
+              echo "矩阵 · ④f --first=1 --last=$maxn 全都没崩 ⇒ 红点与「前缀长度」无关（要看那条用例自己）"
+            fi
+          }
+          step_mark "④f 前缀扫描：红点要不要靠前面的用例「垫」出来（不碰代码）"
+          if [ ! -s "$base_exe" ]; then
+            echo "::error::矩阵：④f 没有 $base_exe ⇒ 前缀扫描做不了，本步结论作废"
+          else
+            prefix_scan "$base_exe" 60
+          fi
+
           echo "===== 诊断矩阵汇总（跑完次数 / 5）====="
           echo "  V0 --preset ci 原样            : ${done_V0:-未跑}"
           echo "  V1 + MESSAGE_TRACE=ON          : ${done_V1:-未跑}"
           echo "  V2 + CRASH_REPORT=ON           : ${done_V2:-未跑}"
           echo "  V3 + BUILD_GUI=OFF             : ${done_V3:-未跑}"
           echo "  V2 的 CLI 侧（bs eval）退出码   : ${cli_V2:-未跑}"
+          echo "  ④f 最小崩掉的前缀 --last=N      : ${prefix_first_bad:-没崩（60 以内）}"
           # 注解是 job 日志匿名读不到时唯一的通道
-          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}、V2-CLI 退出码 ${cli_V2:-?}"
+          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}、V2-CLI 退出码 ${cli_V2:-?}、④f 最小崩前缀 ${prefix_first_bad:-无}"
           echo "  读法：V1 若 =5 而 V0/V2/V3 都 <5 ⇒ **就是那几行探针代码把红点遮住了**（编译期效应），"
           echo "        那么后续仪器必须搬出 core（放进测试可执行文件或独立进程），否则永远看不到它；"
           echo "        V2/V3 若也 =5 ⇒ 阴性对照失效，这台机器上每次构建的堆布局本来就在掷骰子，"
           echo "        结论要改成「红点是随机的」再重做这一轮。"
           echo "        V2-CLI：非 0 且打出「崩溃自报」⇒ 同一次崩溃在 CLI 上也能复现，"
-          echo "        下轮就照它的「模块 + RVA + 调用链」把 BatchResult::error 的析构钉到函数上。"
+          echo "        下轮就照它的「模块 + RVA + 调用链」把 BatchResult::error 的析构钉到函数上；"
+          echo "        退出码 1 且只打一行错误 ⇒ 这条路径本身是干净的，崩的是被别处踩坏的堆。"
+          echo "        ④f：有 N ⇒ 那条用例（及它前面那条）就是引入踩坏的点，下轮直接单跑它；"
+          echo "        没崩 ⇒ 红点与顺序无关，就在崩溃那条用例自己的作用域里。"
 
       # CHM 帮助手册（Windows 原生帮助格式：双击即看、带左侧目录树）
       #
