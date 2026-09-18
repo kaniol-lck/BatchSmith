@@ -206,6 +206,21 @@ jobs:
           outdir="$RUNNER_TEMP/matrix"
           mkdir -p "$outdir"
 
+          # ⚠️ 兜底哨兵（run #46 之后加的）：本步是**一串串行的探测**，任何一处让 shell
+          #   中断（`set -u` 的 unbound、`timeout` 之外的硬错误…），**它后面的全都不跑**
+          #   —— 包括末尾那段汇总。而 `continue-on-error: true` 又让作业照旧是绿的，
+          #   于是"这一轮只跑了一半"在作业列表里**看不出来**（run #46 就是这么白烧的）。
+          #   办法：EXIT 陷阱在**任何**退出路径上都会跑；只有一路走到末尾才会把
+          #   `MATRIX_DONE` 置 1，否则就打一条**说明白了**的 error 注解 + 把已经拿到的
+          #   结论打出来（带着"未跑"），这样"缺了哪几段"一眼可见。
+          MATRIX_DONE=0
+          # 注意：陷阱体用**单引号**包，展开推迟到退出那一刻（这样它读到的是当时的变量值）。
+          # 里面每个变量都写成 `${x:-未跑}` —— 本步带 `set -u`，不这么写陷阱自己会再炸一次。
+          trap 'if [ "${MATRIX_DONE:-0}" != "1" ]; then
+                  echo "::error::诊断矩阵 · 本步**中途死了**：④d/④e/④f/④g/④h/汇总里有没跑到的，下面这些是死之前的结论（未跑=没跑到）"
+                  echo "::error::诊断矩阵 · 退出时已知：V0=${done_V0:-未跑} V1=${done_V1:-未跑} V2=${done_V2:-未跑} V3=${done_V3:-未跑} V2CLI=[${cli_V2_1:-未跑}/${cli_V2_2:-未跑}/${cli_V2_3:-未跑}] ④h=[${ph_V2_1:-未跑}/${ph_V2_2:-未跑}] ④f=${prefix_first_bad:-未跑} ④g=${g_smallest_bad:-未跑}"
+                fi' EXIT
+
           # 一个变体跑 5 次：既看"红/绿"，也看"红得稳不稳"
           probe_variant() {  # $1=变体名 $2=exe
             local name="$1" exe="$2" ok=0 exitbad=0 i=1 code last sum=no
@@ -371,7 +386,14 @@ jobs:
           #   否则 `/v` 会被改写成 `C:/Program Files/Git/v`，reg 判参数非法、**静默失败**。
           #   这里按命令就地设，不动整步的环境（避免影响其余判据）。
           pageheap_cli() {  # $1=变体名（要有 CRASH_REPORT，且已 configure/build 过 bs）
-            local name="$1" bs="build/$name/bin/bs.exe" pcode=0 idx=1 tpl
+            # ⚠️ run #46 的教训（我自己写的坑）：`local a="$1" b="x/$a/…"` 是**错的** ——
+            #   `local` 的**所有参数在任何赋值发生之前就一起展开完了**，所以 `$a` 在这一刻
+            #   还是未定义；本步带 `set -u` ⇒ 这一行直接让**整步** `name: unbound variable` 中断。
+            #   后果不是"④h 没跑"这么轻：④f / ④g / 汇总**全在这之后**，于是一起没了，
+            #   而 `continue-on-error: true` 又让作业照旧是绿的 ⇒ 整整一轮白烧（run #46 实测）。
+            #   ⇒ 依赖前一个变量的赋值**必须另起一行**（`cli_probe` 就是这么写的，所以它一直没事）。
+            local name="$1" pcode=0 idx=1 tpl
+            local bs="build/$name/bin/bs.exe"
             if [ ! -s "$bs" ]; then
               echo "矩阵 · ④h 跳过：没有 $bs"
               return 0
@@ -398,8 +420,11 @@ jobs:
             echo "矩阵 · ④h bs.exe 的 IFEO 已删除"
             return 0
           }
-          step_mark "④h 全页堆下的 CLI（把「事后堆校验」变成「当场 AV」）"
-          pageheap_cli V2 || true
+          # ⚠️ 调用点**故意挪到最末**（在 ④f、④g、汇总之前才调）：
+          #   run #46 就是 ④h 里的一个 `set -u` 变量引用错误让**整步在 ④h 处中断**，
+          #   而 ④f/④g/汇总都排在它后面 ⇒ 一起没跑，作业却照旧是绿的。
+          #   ⇒ 规矩：**最新、最可能出错的探测放最后**，它自己炸就只炸自己。
+          #   实际调用见本步末尾（④g 之后、汇总之前）。
 
           # ④f 前缀扫描：红点要不要靠**前面**的用例"垫"出来？
           #
@@ -527,6 +552,9 @@ jobs:
             trigger_scan "$base_exe" "$prefix_first_bad"
           fi
 
+          step_mark "④h 全页堆下的 CLI（把「事后堆校验」变成「当场 AV」）"
+          pageheap_cli V2 || true
+
           echo "===== 诊断矩阵汇总（打出汇总行的次数 / 5；括号里是其中「退出时崩」的次数）====="
           echo "  V0 --preset ci 原样            : ${done_V0:-未跑}（退出时崩 ${exitbad_V0:-?}）"
           echo "  V1 + MESSAGE_TRACE=ON          : ${done_V1:-未跑}（退出时崩 ${exitbad_V1:-?}）"
@@ -558,10 +586,23 @@ jobs:
           echo "           关 = 0xc0000374（事后堆校验）；开 = 0xc0000005（当场 AV，且会点在"
           echo "           **写的那条指令**或**那次 free** 上）⇒ 就把「事后」变成了「当场」。"
           echo "           两次都一样 ⇒ 钩子没装上，这一步结论作废。"
+          echo "           ④h 实际是从 run #47 才第一次真跑起来的：run #46 的 ④h 函数第一行，"
+          echo "           我把「先赋值 name、再在同一个 local 里引用它」写在了一起 —— 而 local"
+          echo "           的参数在赋值之前就全部展开，本步又带 set -u ⇒ 整步在 ④h 处报"
+          echo "           unbound variable 中断，**排在它后面的 ④f/④g/汇总全没跑**，"
+          echo "           而 continue-on-error 让作业照旧是绿的 ⇒ 那一轮除了 ④e 的两次复现"
+          echo "           （退出码 42）之外**全部作废**，不能拿来当结论。"
+          echo "           ⇒ 现在两道防线：EXIT 兜底陷阱（中途死会打「本步**中途死了**」+ 已得结论）、"
+          echo "             以及 ④h 挪到最末（新代码炸也只炸自己）。看到「中途死了」就说明"
+          echo "             这一轮**不完整**，别当结论用。"
           echo "        ④f：判据 = 「打出汇总行」**且**「退出码 0」——只看前者会把「退出时才崩」算成跑完。"
           echo "            有 N ⇒ 触发点就在第 N 条用例上，不需要更长的前缀；无 N ⇒ 与前缀长度无关。"
           echo "        ④g：K = ④f 的 N ⇒ 那条用例**自身**足够，与顺序无关，下轮直接盯它；"
           echo "            K 远小于 N ⇒ 是**累积**效应，下轮在 [K..N] 里二分找是哪几条垫出来的。"
+
+          # ⭐ 完成哨兵：**必须是本步的最后一条语句**。它是上面那个 EXIT 陷阱唯一认的
+          #   "我一路走到了结尾"凭据；放在汇总**之前**就等于自欺（汇总自己也可能炸）。
+          MATRIX_DONE=1
 
       # CHM 帮助手册（Windows 原生帮助格式：双击即看、带左侧目录树）
       #
