@@ -217,6 +217,24 @@ void watch_block(const QChar* data) {
     watchdog().bytes = 64;
 }
 
+/// 诊断：给「消息的数据块」**额外再持有一份引用**（只留第一份）。
+///
+/// 目的：一刀切开两种完全不同的机制 ——
+///   * 若下一轮的读数变成「页仍是已提交/读写、ref 从 1 变 2」⇒ 块是被**引用计数减到 0**
+///     释放的（我们多拿的那一份把它救回来了），那就去找那次多余的 deref；
+///   * 若页照样翻成「已保留」⇒ 释放**绕过引用计数**（谁直接 `free` 了它，或者堆元数据
+///     已经被写坏、堆自己把这块丢了）。后者与 CI 单元测试长期报的 `0xc0000374`
+///     （堆损坏）是同一个故事 —— 那正是这条线索最值得确认的地方。
+void hold_message_reference(const QString& value) {
+    if (!message_trace_on() || value.isNull()) {
+        return;
+    }
+    static QString held;  // 进程生命周期内只留第一份，避免每行都加一份
+    if (held.isNull()) {
+        held = value;  // 引用计数 +1
+    }
+}
+
 /// 分配器每次调用都过一道：命中了就报一行（没命中时零开销之外只有一次比较）。
 void watch_report(const char* what, const void* address, std::size_t arg1, std::size_t arg2) {
     if (!message_trace_on()) {
@@ -245,10 +263,12 @@ void watch_report(const char* what, const void* address, std::size_t arg1, std::
 }  // namespace
 
 #define BATCHSMITH_WATCH(what, ptr, a, b) watch_report(what, ptr, a, b)
+#define BATCHSMITH_HOLD(v) hold_message_reference(v)
 
 #else
 
 #define BATCHSMITH_WATCH(what, ptr, a, b) ((void)0)
+#define BATCHSMITH_HOLD(v) ((void)0)
 
 #endif  // BATCHSMITH_MESSAGE_TRACE && _WIN32
 
@@ -513,6 +533,10 @@ void Sandbox::raise(Violation kind, const QString& message) {
         m_violation_message = message;
         trace_message("raise 赋值之后", "参数", message);
         trace_violation_message("raise 赋值之后");
+        // 诊断：额外多持一份引用。下一轮读数里 ref 应从 1 变 2；若块**照样**被释放
+        // （页仍翻成"已保留"），就说明释放绕过了引用计数 —— 那指向堆层面的问题
+        // （谁直接 free 了它 / 堆元数据已被写坏），而不是 QString 的引用计数出错。
+        BATCHSMITH_HOLD(m_violation_message);
     }
 }
 
@@ -526,7 +550,6 @@ void Sandbox::clear_violation() {
 namespace {
 
 /// 地址所在页的性质：状态 / 类型 / 保护 / 区域大小。
-///
 /// `已保留` 与 `已提交` 的区别就是这一轮的关键：前者表示"这块地址属于某个保留区、
 /// 但页没有提交"，写上去必然 AV；`空闲` 则是彻底还给系统了。
 void describe_page(const void* address, char* out, std::size_t out_size) {
@@ -593,8 +616,8 @@ void describe_page(const void* address, char* out, std::size_t out_size) {
 struct HeaderWords {
     bool readable = false;
     int ref = 0;
-    int size = 0;
-    unsigned flags = 0;
+    int word4 = 0;
+    unsigned word8 = 0;
 };
 
 bool page_readable(const void* address) {
@@ -615,8 +638,12 @@ bool page_readable(const void* address) {
     return true;
 }
 
-/// Qt6 的 `QArrayData` 布局：`ref`(4) + `size`(4) + `alloc:31/capacityReserved:1`(4) + 填充(4)，
-/// 然后是 `offset`（8 字节，实测为 16 ⇒ `数据指针 = 头部 + 16`）。
+/// Qt6 的 `QArrayData` 布局：头 16 字节 + 数据（`数据指针 = 头部 + 16`，由崩溃自报的
+/// `ptr == d + 0x10` 实测确认）。头里三个 4 字节字中：
+///   * **+0 是引用计数**（实测：赋值前 1 → 赋值后 2 → 临时析构后 1），
+///   * 而**字符数落在 +8**，不是我一开始以为的 +4（`+4` 实测恒为 0）。
+/// 所以下面按偏移原样读三个字，不在名字上冒认 —— 上一轮把 +8 标成 "flags"、
+/// 把 +4 标成 "size"，虽然不影响结论（长度另有 `QString::size()`），但会误导下一个人。
 HeaderWords read_header(const QChar* data) {
     HeaderWords words;
     if (data == nullptr) {
@@ -629,8 +656,8 @@ HeaderWords read_header(const QChar* data) {
     int fields[3] = {0, 0, 0};
     std::memcpy(fields, raw, sizeof(fields));
     words.ref = fields[0];
-    words.size = fields[1];
-    words.flags = static_cast<unsigned>(fields[2]);
+    words.word4 = fields[1];
+    words.word8 = static_cast<unsigned>(fields[2]);
     words.readable = true;
     return words;
 }
@@ -687,12 +714,18 @@ void Sandbox::trace_message(const char* where, const char* label, const QString&
     if (!header_applicable) {
         std::snprintf(header, sizeof(header), "（空串：无数据头可读）");
     } else if (words.readable) {
+        // ⚠️ 字段名要诚实：本机实测发现 `QString` 的**字符数**落在头的 **+8** 位置，
+        //    而我原先当作 "size" 的 **+4** 读出来是 0（见下方说明）。
+        //    所以这里只把**语义已被三点读数证实**的那个词叫 `ref`
+        //    （赋值前 1 → 赋值后 2 → 临时析构后 1，三点连成一条线，不可能是巧合），
+        //    其余两个字按偏移原样报出，长度则用 `QString::size()` 取值。
         std::snprintf(header,
                       sizeof(header),
-                      "ref=%d size=%d flags=0x%08X",
+                      "ref=%d 字4=%d 字8=0x%08X 长度=%lld",
                       words.ref,
-                      words.size,
-                      words.flags);
+                      words.word4,
+                      words.word8,
+                      static_cast<long long>(value.size()));
     } else {
         std::snprintf(header, sizeof(header), "读不动（页不可读）");
     }
