@@ -167,6 +167,13 @@ BatchResult evaluate_template(const QString& template_text,
                 // 诊断探针：与 raise() 里那一次对起来看，就知道消息的数据块是在哪一步丢的。
                 box.trace_violation_message("中止分支：拷贝之前");
                 result.error = QStringLiteral("已中止：%1").arg(box.violation_message());
+                // 诊断探针：拷贝**之后**再看一眼。run #37 证明「多持一份引用」能让这一行
+                // 平安走完（拷贝那次自增没问题），所以这一眼是用来看"块到底还在不在"的；
+                // 它若显示「已保留/读不动」而上面那行还是好的 ⇒ 就是这次拷贝的**析构**把它减没的。
+                box.trace_violation_message("中止分支：拷贝之后");
+                // 诊断：拷贝走完就摘掉写看门狗 —— 再往后块随时可能被堆释放，
+                // 让堆去写一个只读页就是仪器自己制造故障了。
+                box.disarm_message_write_watch();
             } else {
                 result.error = describe_error(compiled, raw);
             }

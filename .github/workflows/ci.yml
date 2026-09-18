@@ -938,7 +938,15 @@ jobs:
             # `BATCHSMITH_MESSAGE_TRACE=1` 是**探针的开关**：编译期只决定"实现存不存在"，
             # 这里才决定"打不打印"。分开两个开关是为了让同一次诊断构建里的单元测试
             # 不被打扰（它们也会跑到中止路径，默认关着就安静）。
-            BATCHSMITH_MESSAGE_TRACE=1 timeout 300 "$bs_exe" eval '$(function() while true do end end)()$' \
+            # `BATCHSMITH_MESSAGE_PAGE_WATCH=1` 是**写看门狗**：把消息块所在整页改成只读，
+            # 任何写它的指令都会当场 AV 并被 VEH 报出「模块 + RVA」——run #37 已证明那一减
+            # 发生在纯 Lua 长跳窗口里（没有一行 Qt 代码），日志切不动了，只能让写自己撞墙。
+            # `..._SELFTEST=1` 先在一块自造内存上验证仪器真能拦下写（"没命中"与"没挂上"
+            # 从日志上看是一样的，不先自证就没法解释）。
+            BATCHSMITH_MESSAGE_TRACE=1 \
+              BATCHSMITH_MESSAGE_PAGE_WATCH=1 \
+              BATCHSMITH_MESSAGE_PAGE_WATCH_SELFTEST=1 \
+              timeout 300 "$bs_exe" eval '$(function() while true do end end)()$' \
               --list list1=a,b > "$bundle/run-cli-abort.txt" 2>&1
             code_cli=$?
             set -e
@@ -1006,16 +1014,33 @@ jobs:
             # 看门狗：沙箱自己的 Lua 分配器只要碰了「消息的数据块」，就会喊一声。
             # 它是追"谁释放的"的主力 —— 不依赖任何堆/页 API（上一轮的 HeapSize 就是栽在那里）。
             watch_hits=$(grep -ac '^\[batchsmith\] ⚠️⚠️ Lua 分配器动了被盯的块' "$bundle/run-cli-abort.txt" || true)
+            # 写看门狗（run #38 新加的）：自检段里的命中行必须 ≥1，否则"没命中"这个结论作废。
+            selftest_hits=$(awk '/写看门狗自检：目标=/{in_selftest=1} /写看门狗自检：写调用已返回/{in_selftest=0} /⚠️⚠️ 写看门狗命中/{if (in_selftest) n++} END{print n+0}' "$bundle/run-cli-abort.txt" 2>/dev/null || echo 0)
+            real_hits=$(awk '/写看门狗自检：写调用已返回/{after=1} /⚠️⚠️ 写看门狗命中/{if (after) n++} END{print n+0}' "$bundle/run-cli-abort.txt" 2>/dev/null || echo 0)
             if [ "${probes:-0}" -eq 0 ]; then
               echo "::error::④c 一行探针都没有 ⇒ BATCHSMITH_MESSAGE_TRACE 没生效（本站作业的问题），本轮定不了「哪一步丢的消息」"
             else
-              echo "--- 探针（共 $probes 行，期望 ≥ 7 行）---"
+              echo "--- 探针（共 $probes 行，期望 ≥ 8 行）---"
               grep -a '^\[batchsmith\] 探针 ' "$bundle/run-cli-abort.txt" | tr -d '\r' || true
-              if [ "$probes" -lt 7 ]; then
-                echo "::warning::探针只打出 $probes 行（期望 ≥ 7）⇒ 二分的区间不完整：看它停在哪一步之前"
+              if [ "$probes" -lt 8 ]; then
+                echo "::warning::探针只打出 $probes 行（期望 ≥ 8）⇒ 二分的区间不完整：看它停在哪一步之前"
               fi
               echo "--- 看门狗（共 ${watch_hits:-0} 行；≥1 就说明是 Lua 分配器把消息的块动掉了）---"
               grep -a '^\[batchsmith\] ⚠️⚠️ Lua 分配器动了被盯的块' "$bundle/run-cli-abort.txt" | tr -d '\r' || true
+              # 写看门狗的**仪器有效性**判据：自检那一段必须出现命中行。
+              # ⚠️ 没有这一条，"写看门狗 0 命中"就会被读成"这段时间没人写"——而它同样可能
+              #    只是"页根本没改成只读"。这是上一轮 HeapSize 栽过的坑，必须留个机械判据。
+              if [ "${selftest_hits:-0}" -eq 0 ]; then
+                echo "::error::写看门狗自检没命中 ⇒ 仪器没挂上（或没生效），本轮「命中/未命中」都不能当结论"
+              else
+                echo "写看门狗自检通过：自检段命中 $selftest_hits 行（仪器确实能拦下写）"
+              fi
+              echo "--- 写看门狗命中（真目标，共 ${real_hits:-0} 行）——**这几行就是「谁偷了那次引用」** ---"
+              awk '/写看门狗自检：写调用已返回/{after=1} after' "$bundle/run-cli-abort.txt" 2>/dev/null \
+                | grep -a '^\[batchsmith\]' | head -30 | tr -d '\r' || true
+              if [ "${real_hits:-0}" -eq 0 ]; then
+                echo "::warning::真目标上一次写都没命中 ⇒ 这段区间里没有写（或块根本没被动过）"
+              fi
             fi
           else
             echo "::warning::bs.exe 没构建出来 —— ④c 跳过（这一步是拿「出错指令 RVA」的通道）"
@@ -1101,13 +1126,13 @@ jobs:
             echo "== 出错指令与调用链（④c：CLI 的 VEH 自报 —— **本轮的正主**）=="
             echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）、调用链 ${frames_selftest:-?} 帧（应 ≥ 3）、寄存器行 ${regs_selftest:-?} 条（应 ≥ 1）"
             head -60 "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
-            echo "消息追踪探针: ${probes:-0} 行（期望 ≥ 7）；看门狗命中: ${watch_hits:-0} 行"
+            echo "消息追踪探针: ${probes:-0} 行（期望 ≥ 8）；Lua 分配器看门狗命中: ${watch_hits:-0} 行；写看门狗: 自检 ${selftest_hits:-0} 行 / 真目标 ${real_hits:-0} 行"
             echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
             head -60 "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
-            echo "→ 每行格式：[batchsmith] 探针 <时点> / <看的是谁>：数据=<指针>（页性质） 头部[ref/size/flags]"
+            echo "→ 每行格式：[batchsmith] 探针 <时点> / <看的是谁>：数据=<指针>（页性质） 头部[ref/字4/字8/长度]"
             echo "  时点按时间顺序：注入列表之后 → raise 赋值之前(参数) → raise 赋值之后(参数/成员)"
             echo "                  → limit_hook：raise 返回之后(成员) → lua_pcall 返回之后(成员)"
-            echo "                  → 中止分支：拷贝之前(成员)"
+            echo "                  → 中止分支：拷贝之前(成员) → 中止分支：拷贝之后(成员)"
             echo "  判据（引用计数这一列是关键）："
             echo "    * raise 赋值之前 参数 ref=1，赋值之后 参数与成员 ref=2 且指针相同 ⇒ 引用计数算对了；"
             echo "      若赋值之后仍是 ref=1 ⇒ 「这次赋值没自增」，临时析构会把块减到 0 并释放 —— 凶手即此处。"
@@ -1115,12 +1140,33 @@ jobs:
             echo "    * run #36 又把区间切了一刀：raise 返回之后还健康，到「lua_pcall 返回之后」"
             echo "      就已经「读不动」⇒ 释放发生在 lua_pcall 内部（Lua 的错误传播）；"
             echo "      而 Lua 分配器看门狗 0 命中 ⇒ 不是沙箱的 Lua 分配器干的。"
-            echo "    * 本轮在 raise() 里**额外多持了一份引用**（诊断用）⇒ 探针 5~7 的 ref 应为 2："
-            echo "      - 页保持「已提交/私有/读写」+ 崩溃消失 ⇒ 块是被**引用计数减到 0**释放的，"
-            echo "        多拿的那一份把它救回来了 ⇒ 去找那次多余的 deref；"
-            echo "      - 页照样翻成「已保留」⇒ 释放**绕过引用计数**（谁直接 free 了它，"
-            echo "        或者堆元数据已被写坏、堆自己把这块丢了）。后者与 CI 单元测试长期报的"
-            echo "        「0xc0000374」（堆损坏）是同一个故事 —— 那正是最值得确认的一支。"
+            echo "    * run #37 用「多持一份引用」把两种机制**切开**了："
+            echo "      - 中止分支不再崩（探针 5~7 全是「已提交/私有/读写」，拷贝那次自增完好）"
+            echo "        ⇒ 多拿的那一份确实把块救回来了；"
+            echo "      - 但块**照样**被释放（页最终翻成「已保留」、区域从 4K 并成 48K），崩溃顺势挪到"
+            echo "        **退出时那个 QString 的析构**（Qt6Core.dll + 0x418d = ~QString 里的引用计数写，"
+            echo "        调用链是 __scrt_common_main_seh + 0x176 ⇒ exit() 里跑静态析构、没有 main 帧）。"
+            echo "      ⇒ 合成一句可查的话：**消息块的引用计数被多减了一次**（偷走的正是"
+            echo "        m_violation_message 那一份）—— 减到 0 就提前释放，之后谁再碰它谁 AV；"
+            echo "        而在**普通堆**下同一块被释放两次 ⇒ 堆校验当场报 0xc0000374。"
+            echo "        两个症状（AV 与 HEAP_CORRUPTION）至此归到同一条因上。"
+            echo "      ⚠️ 本机（MinGW）这条路径上**没有**那一减（探针 5→6 的 ref 一直是 2）"
+            echo "        ⇒ 只有 CI 的 MSVC + 官方 Qt 才有，只能在 CI 上抓。"
+            echo "    * 那一减发生在 raise() 返回之后、lua_pcall 返回之前（ref 2→1），而那一段里"
+            echo "      **没有一行 Qt 代码**（纯 luaL_error 长跳 + Lua 的错误传播）⇒ 探针切不动了，"
+            echo "      改成让那次写自己撞墙：写看门狗把消息块所在整页改成只读，任何写它的指令当场 AV，"
+            echo "      VEH 里报出**模块 + RVA**（外部模块用 pe_rva.py、主模块用 symbolicate.py 翻符号）；"
+            echo "      报完恢复可写并用单步重挂，最多报 6 次 ⇒ 日志里能按时间顺序看到一串写。"
+            echo "★ 读本轮日志的顺序："
+            echo "  1) 先看「写看门狗自检」那段有没有命中 —— 没有命中就说明仪器根本没挂上，"
+            echo "     后面的「没命中」一律不作数；"
+            echo "  2) 再看「写看门狗命中」落在**哪两个探针行之间**："
+            echo "     - 落在「limit_hook：raise 返回之后」与「lua_pcall 返回之后」之间的那条，"
+            echo "       就是偷引用的凶手 ⇒ 拿它的模块 + RVA 去翻符号；"
+            echo "     - 若只看到拷贝构造那一簇（Qt6Core + 0x10860 附近）与析构（+0x418d），"
+            echo "       说明这一轮没抓到，区间还得往 Lua 里推；"
+            echo "  3) 每行里的「该地址原值=N」是写之前的引用计数（块头 +0）——"
+            echo "     「原值=2」这种读数出现就说明那次写把它减到了 1，正是要抓的那一减。"
             echo "    * 页性质从「已提交/私有/读写」翻成「已保留/空闲」的那一步就是释放发生的区间；"
             echo "      ⚠️ 本机实测（.workbuddy/tools/pageprobe/）：「已保留」= 读写都当场 AV，"
             echo "      所以「已保留」与「成功读出内容」不可能同时为真 —— 一行里若两者并现，"

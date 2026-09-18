@@ -138,6 +138,23 @@ public:
     /// 同上，专门看 `m_violation_message`。
     void trace_violation_message(const char* where) const;
 
+    /// 诊断用：把 `m_violation_message` 的数据块**所在的整页改成只读** ⇒ 之后任何写它的指令
+    /// 都会当场 AV，被沙箱装的 VEH 拦下并打印「哪个模块 + RVA（+ 寄存器）」。
+    ///
+    /// 用途（run #37 的结论）：在 `raise()` 里多持一份引用之后，中止分支不再崩、但块**照样**
+    /// 被释放，崩点挪到了退出时的 `~QString()` ⇒ 说明块的**引用计数被多减了一次**，而且那一减
+    /// 发生在 `raise()` 返回之后、`lua_pcall` 返回之前（探针 ref 2→1）。那一段里没有一行 Qt
+    /// 代码，日志切不动了，只能让那次写自己撞墙。
+    ///
+    /// 需要环境变量 `BATCHSMITH_MESSAGE_PAGE_WATCH=1`
+    /// 才会动手；`BATCHSMITH_MESSAGE_PAGE_WATCH_SELFTEST=1`
+    /// 时先在一块自造的内存上跑一遍自检（证明仪器真的能拦下写，而不是"没报=没事"）。
+    void arm_message_write_watch() const;
+
+    /// 摘掉写看门狗（把页恢复成可写）。必须在块可能被**堆释放**之前调用 —— 否则堆写自己的块头
+    /// 也会撞上只读页，那就是仪器自己制造故障了。
+    void disarm_message_write_watch() const;
+
     void clear_violation();
 
     // ---- 供 helper 内部使用 ----

@@ -260,6 +260,234 @@ void watch_report(const char* what, const void* address, std::size_t arg1, std::
     std::fflush(stderr);
 }
 
+// ===== 写看门狗：把「消息数据块」所在的整页改成只读 =====
+//
+// 为什么需要它（run #37 把这条线走到底之后的结论）：在 `raise()` 里**多持一份引用**之后
+//   * 中止分支不再崩（探针 1~7 全程「已提交/私有/读写」，那次拷贝自增完好）；
+//   * 但块**照样**被释放（页最终翻成「已保留」、区域从 4K 并成 48K），
+//     崩点顺势挪到**退出时那个 `QString` 的析构**（`Qt6Core.dll + 0x418d` = `~QString`
+//     里那句引用计数写；调用链是 `__scrt_common_main_seh + 0x176` ⇒ `exit()` 里跑静态析构，
+//     **没有 main 帧**）。
+// ⇒ 结论：**块的引用计数被多减了一次**（"偷"走了 `m_violation_message` 那一份），
+//    而那一减发生在 `raise()` 返回之后、`lua_pcall` 返回之前（探针 5→6：ref 由 2 变 1）。
+//    ⚠️ 本机（MinGW）同一条路径上**没有**这一减 ⇒ 只有 CI 的 MSVC + 官方 Qt 才有。
+//
+// 那一段里没有任何一行 Qt 代码（纯 `luaL_error` 长跳 + Lua 的错误传播），靠日志再也切不动了
+// —— 所以换仪器：**让那次写当场 AV**。把块所在页改成只读，任何写都触发 `0xc0000005`，
+// VEH 里报出「哪条指令、哪个模块、页内偏移」，报完把页恢复可写继续跑（那次写已被拦下、不生效）。
+// 于是"谁偷了这一次引用"从"猜"变成"读一行日志"。
+
+constexpr std::size_t kPageWatchBytes = 4096;
+
+/// 写看门狗当前盯着的页（一次只挂一处）。
+///
+/// ⚠️ 拦截是"报一次、放行一次"：AV 发生在指令**完成之前**，所以恢复页保护后那条指令会重跑并成功
+/// ——被拦下的那次写**不生效**。为了看到"一串写"（而不是只知道第一个），命中之后给线程置单步
+/// 标志（TF），下一条指令执行完的单步异常里再把页改回只读 ⇒ 就能按时间顺序一条条报出来。
+struct PageWatch {
+    void* page = nullptr;
+    DWORD old_protect = 0;
+    bool armed = false;
+    bool rearm_after_trap = true;  // 自检目标不重挂（自检用的缓冲很快会被 free，重挂会咬到堆）
+    bool rearm_pending = false;  // 已经置了 TF，等单步异常里重挂
+    int trapped = 0;
+};
+
+constexpr int kMaxPageTraps = 6;  // 报够这么多就收手，免得把流程搅乱
+
+PageWatch& page_watch() {
+    static PageWatch instance;
+    return instance;
+}
+
+/// 写看门狗的总开关 —— 与消息探针**分开**：探针只读，这个会改页保护。
+bool page_watch_on() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("BATCHSMITH_MESSAGE_PAGE_WATCH");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+/// 「模块名 + 0xRVA」，口径与崩溃自报一致（外部模块也能算，靠 `AllocationBase`）。
+void describe_owner(void* address, char* out, std::size_t out_size) {
+    MEMORY_BASIC_INFORMATION mbi;
+    std::memset(&mbi, 0, sizeof(mbi));
+    if (::VirtualQuery(address, &mbi, sizeof(mbi)) == 0 || mbi.AllocationBase == nullptr) {
+        std::snprintf(out, out_size, "（未知模块）");
+        return;
+    }
+    wchar_t wide[512] = {0};
+    char name[512] = {0};
+    if (::GetModuleFileNameW(static_cast<HMODULE>(mbi.AllocationBase), wide, 512) > 0) {
+        ::WideCharToMultiByte(
+                CP_UTF8, 0, wide, -1, name, static_cast<int>(sizeof(name)), nullptr, nullptr);
+    }
+    const char* base = std::strrchr(name, '\\');
+    base = base == nullptr ? name : base + 1;
+    const unsigned long long offset = reinterpret_cast<unsigned long long>(address) -
+                                      reinterpret_cast<unsigned long long>(mbi.AllocationBase);
+    std::snprintf(out, out_size, "%s + 0x%llX", base[0] == '\0' ? "?" : base, offset);
+}
+
+void set_page_protect(const void* page, DWORD protect) {
+    DWORD ignored = 0;
+    ::VirtualProtect(const_cast<void*>(page), kPageWatchBytes, protect, &ignored);
+}
+
+/// 命中就报出**是哪条指令**写的，然后恢复页保护（可选重挂）、放行。
+///
+/// ⚠️ 被拦下的那次写**不生效** ⇒ 命中之后引用计数不再被偷、流程会"变得正常"，这是预期的：
+///    本仪器只负责指认凶手，不负责让现场继续崩。
+LONG CALLBACK page_watch_handler(EXCEPTION_POINTERS* info) {
+    if (info == nullptr || info->ExceptionRecord == nullptr || info->ContextRecord == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    PageWatch& watch = page_watch();
+    const DWORD code = info->ExceptionRecord->ExceptionCode;
+
+    // 单步：上一次命中之后用来重挂页保护的那一步（只认自己置的 TF）。
+    if (code == EXCEPTION_SINGLE_STEP) {
+        if (!watch.rearm_pending || !watch.armed) {
+            return EXCEPTION_CONTINUE_SEARCH;
+        }
+        info->ContextRecord->EFlags &= ~static_cast<DWORD>(0x100);  // 清 TF，别一直单步
+        watch.rearm_pending = false;
+        set_page_protect(watch.page, PAGE_READONLY);
+        return EXCEPTION_CONTINUE_EXECUTION;
+    }
+
+    if (code != EXCEPTION_ACCESS_VIOLATION || !watch.armed || watch.page == nullptr) {
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    const auto address =
+            static_cast<unsigned long long>(info->ExceptionRecord->ExceptionInformation[1]);
+    const auto base = reinterpret_cast<unsigned long long>(watch.page);
+    if (address < base || address >= base + kPageWatchBytes) {
+        return EXCEPTION_CONTINUE_SEARCH;  // 别的页的 AV：交给崩溃自报
+    }
+
+    // 写之前那个 4 字节字长什么样 —— 引用计数就在块头 +0，所以这一眼直接说明"被减的是谁"。
+    int word_before = 0;
+    std::memcpy(&word_before, reinterpret_cast<const void*>(address), sizeof(word_before));
+
+    char owner[576];
+    describe_owner(reinterpret_cast<void*>(info->ContextRecord->Rip), owner, sizeof(owner));
+    const unsigned long long operation = info->ExceptionRecord->ExceptionInformation[0];
+    std::fprintf(stderr,
+                 "[batchsmith] ⚠️⚠️ 写看门狗命中 #%d：%s（页内偏移 %llu）写地址=%p 操作=%s\n"
+                 "  该地址原值=%d（块头 +0 就是引用计数）rcx=0x%llX rdx=0x%llX r8=0x%llX\n",
+                 watch.trapped + 1,
+                 owner,
+                 address - base,
+                 reinterpret_cast<const void*>(address),
+                 operation == 8 ? "执行" : (operation == 1 ? "写" : "读"),
+                 word_before,
+                 static_cast<unsigned long long>(info->ContextRecord->Rcx),
+                 static_cast<unsigned long long>(info->ContextRecord->Rdx),
+                 static_cast<unsigned long long>(info->ContextRecord->R8));
+    std::fflush(stderr);
+
+    set_page_protect(watch.page, watch.old_protect);  // 先放行这一条（它会重跑并成功）
+    ++watch.trapped;
+    if (watch.rearm_after_trap && watch.trapped < kMaxPageTraps) {
+        watch.rearm_pending = true;
+        info->ContextRecord->EFlags |= 0x100;  // TF：这条跑完就单步异常，在那里重挂
+    } else {
+        watch.armed = false;
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
+void install_page_watch_handler() {
+    static const bool installed = [] {
+        ::AddVectoredExceptionHandler(1, page_watch_handler);  // 1 = 排在最前面，先于崩溃自报
+        return true;
+    }();
+    (void)installed;
+}
+
+/// 把 `address` 所在整页改成只读；返回是否挂上（挂不上必须留下痕迹，否则"没命中"没法解释）。
+bool arm_page_watch(const void* address, bool rearm_after_trap) {
+    if (address == nullptr) {
+        return false;
+    }
+    install_page_watch_handler();
+    PageWatch& watch = page_watch();
+    if (watch.armed) {  // 上一处还没解除（不该发生）：先还原
+        set_page_protect(watch.page, watch.old_protect);
+        watch.armed = false;
+    }
+    const auto base = reinterpret_cast<unsigned long long>(address) &
+                      ~static_cast<unsigned long long>(kPageWatchBytes - 1);
+    DWORD old = 0;
+    void* page = reinterpret_cast<void*>(base);
+    if (::VirtualProtect(page, kPageWatchBytes, PAGE_READONLY, &old) == 0) {
+        std::fprintf(stderr,
+                     "[batchsmith] 写看门狗挂不上：页=%p GetLastError=%lu\n",
+                     page,
+                     static_cast<unsigned long>(::GetLastError()));
+        std::fflush(stderr);
+        return false;
+    }
+    watch.page = page;
+    watch.old_protect = old;
+    watch.armed = true;
+    watch.rearm_after_trap = rearm_after_trap;
+    watch.rearm_pending = false;
+    watch.trapped = 0;
+    std::fprintf(
+            stderr,
+            "[batchsmith] 写看门狗已挂：页=%p（原保护=0x%lX，最多报 %d 次）⇒ 之后任何写这一页的"
+            "指令都会当场被报出来\n",
+            page,
+            static_cast<unsigned long>(old),
+            kMaxPageTraps);
+    std::fflush(stderr);
+    return true;
+}
+
+/// 收工：把页恢复成可写（否则堆在释放这个块时会撞上只读页，反而踩出新问题）。
+void disarm_page_watch() {
+    PageWatch& watch = page_watch();
+    if (!watch.armed && !watch.rearm_pending) {
+        return;
+    }
+    if (watch.page != nullptr) {
+        set_page_protect(watch.page, watch.old_protect);
+    }
+    watch.armed = false;
+    watch.rearm_pending = false;
+}
+
+/// 自检：自己造一页内存挂上写看门狗，然后**故意写它** —— 必须看到一行「写看门狗命中」。
+///
+/// 为什么非自检不可：这类仪器"没报"有两种含义完全不同的原因 ——「没命中」与「压根没挂上」，
+/// 而两者从日志上看一模一样（上一轮的 `HeapSize` 就是"没报当没事"吃掉的整轮结论）。
+void page_watch_selftest() {
+    const char* flag = std::getenv("BATCHSMITH_MESSAGE_PAGE_WATCH_SELFTEST");
+    if (!page_watch_on() || flag == nullptr || flag[0] != '1') {
+        return;
+    }
+    auto* buffer = static_cast<char*>(std::malloc(kPageWatchBytes * 2));
+    if (buffer == nullptr) {
+        std::fprintf(stderr, "[batchsmith] 写看门狗自检：分配失败，跳过\n");
+        std::fflush(stderr);
+        return;
+    }
+    // 打在第二页上，避开 malloc 自己的块头（块头在第一页里）。
+    char* target = buffer + kPageWatchBytes;
+    std::fprintf(stderr, "[batchsmith] 写看门狗自检：目标=%p\n", static_cast<void*>(target));
+    std::fflush(stderr);
+    if (arm_page_watch(target, false)) {  // 自检只报一次、不重挂
+        *target = 1;  // 期望：当场被拦下，命中行里的指令就在本函数内
+        std::fprintf(stderr,
+                     "[batchsmith] 写看门狗自检：写调用已返回 —— 上面若没有命中行，说明没挂住\n");
+        std::fflush(stderr);
+    }
+    std::free(buffer);
+}
+
 }  // namespace
 
 #define BATCHSMITH_WATCH(what, ptr, a, b) watch_report(what, ptr, a, b)
@@ -358,6 +586,10 @@ void limit_hook(lua_State* state, lua_Debug* /*debug*/) {
         //   * 到这里就「已保留」⇒ 释放发生在临时析构 ⇒ 赋值时引用计数少算了一次；
         //   * 到这里还好、只有后面才坏 ⇒ 凶手在 Lua 错误传播那条路上。
         sandbox->trace_violation_message("limit_hook：raise 返回之后");
+        // 诊断：挂写看门狗（见 sandbox.cpp 里那段说明）。**必须挂在这里、不能挂进 `raise()`**：
+        // `raise(...)` 那条语句收尾时参数临时对象会析构，那也是一次合法的引用计数写，
+        // 挂早了第一个命中的就是它，反而把真正要找的那一减挤掉。
+        sandbox->arm_message_write_watch();
         luaL_error(state, "sandbox aborted: instruction limit exceeded");
         return;
     }
@@ -743,11 +975,27 @@ void Sandbox::trace_violation_message(const char* where) const {
     trace_message(where, "成员", m_violation_message);
 }
 
+void Sandbox::arm_message_write_watch() const {
+    if (!page_watch_on() || m_violation_message.isEmpty()) {
+        return;
+    }
+    page_watch_selftest();  // 只在开了自检开关时真的跑
+    arm_page_watch(m_violation_message.constData(), /*rearm_after_trap=*/true);
+}
+
+void Sandbox::disarm_message_write_watch() const {
+    disarm_page_watch();
+}
+
 #else
 
 void Sandbox::trace_message(const char*, const char*, const QString&) const {}
 
 void Sandbox::trace_violation_message(const char*) const {}
+
+void Sandbox::arm_message_write_watch() const {}
+
+void Sandbox::disarm_message_write_watch() const {}
 
 #endif  // BATCHSMITH_MESSAGE_TRACE && _WIN32
 
