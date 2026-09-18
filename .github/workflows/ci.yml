@@ -900,17 +900,23 @@ jobs:
             # 仪器自检（**先验收仪器，再看它的结论**）：故意空指针写，逼出一个真异常。
             # 没有这一道，"没打出 VEH 那行"既可能是"没崩"，也可能是"仪器根本没装上"——
             # 这个项目已经在"仪器没生效"上白扔过好几轮。
-            mark "④c-1 崩溃自报仪器自检（故意空指针写，应打印 RVA 且退出码 42）"
+            mark "④c-1 崩溃自报仪器自检（已知深度递归 + 空指针写，应打印模块名与 ≥3 帧调用链、退出码 42）"
             set +e
             BATCHSMITH_CRASH_SELFTEST=1 timeout 60 "$bs_exe" --version \
               > "$bundle/cli-crash-selftest.txt" 2>&1
             code_selftest=$?
             set -e
-            head -6 "$bundle/cli-crash-selftest.txt" | tr -d '\r' || true
+            head -40 "$bundle/cli-crash-selftest.txt" | tr -d '\r' || true
+            # 自检要验两件事，缺一不可：① 仪器接住了异常（退出码 42 + 自报那行）；
+            # ② **调用链真的走起来了**。第二件是 run #28 之后补上的 —— 当时的自检只验了 ①，
+            # 而同一轮的真崩恰恰落在"只报主模块 RVA"这个盲区里（出错指令在别的模块）。
+            frames_selftest=$(grep -ac '^    #' "$bundle/cli-crash-selftest.txt" || true)
             if [ "$code_selftest" -ne 42 ] || ! grep -qa '崩溃自报' "$bundle/cli-crash-selftest.txt"; then
               echo "::error::崩溃自报仪器**没生效**（退出码 $code_selftest，应为 42）⇒ ④c 的结论不可信；本站作业的问题"
+            elif [ "${frames_selftest:-0}" -lt 3 ]; then
+              echo "::error::崩溃自报仪器只走出 ${frames_selftest:-0} 帧调用链（应 ≥ 3）⇒ 步行没工作，④c 的调用链不可信；本站作业的问题"
             else
-              echo "仪器自检通过：VEH 已装上、RVA 已算出、退出码 42"
+              echo "仪器自检通过：VEH 已装上、模块名与 RVA 已算出、调用链 $frames_selftest 帧、退出码 42"
             fi
 
             set +e
@@ -928,17 +934,19 @@ jobs:
             echo "CLI 中止路径（PageHeap 下）：退出码 $code_cli"
             # ⚠️ 退出码在这里是**残缺**的：bash 对无法映射到信号的 NTSTATUS 一律报 127，
             #    所以 127 既可能是"命令没找到"也可能是"0xC0000374"。判据改用**输出内容**：
-            #    * 42  + `崩溃自报` 行 ⇒ 当场 AV，且已经拿到了出错指令 RVA（这是要的东西）
+            #    * 42  + `崩溃自报` 行 ⇒ 当场 AV，且拿到了「模块名 + RVA + 调用链」（这是要的东西）
             #    * `已中止：指令数超过上限` ⇒ 这一次没复现
+            # ⚠️ run #28 的教训：那次出错指令落在**别的模块**里，而旧实现只对主模块算 RVA
+            #    ⇒ 最有价值的一条信息只打出一个 0。所以这里不再"抽一行来看"，
+            #    整段原文（含调用链）都打出来 —— 价值就在那几帧上。
             if grep -qa '崩溃自报' "$bundle/run-cli-abort.txt"; then
-              echo "  → ✓ 当场 AV，VEH 已报出出错指令 RVA（下面这行就是本轮的正主）"
-              grep -a 'RVA' "$bundle/run-cli-abort.txt" | tr -d '\r' || true
+              echo "  → ✓ 当场 AV，VEH 已报出模块名 + RVA + 调用链（下面这段就是本轮的正主）"
             elif grep -qa '已中止' "$bundle/run-cli-abort.txt"; then
               echo "  → 正常走到了「已中止」这条路径（未触发 AV）⇒ 本探针这一次没抓住，看下一轮"
             else
               echo "  → 既没有「崩溃自报」也没有「已中止」⇒ 看下面这几行的原文"
             fi
-            head -8 "$bundle/run-cli-abort.txt" | tr -d '\r' || true
+            head -40 "$bundle/run-cli-abort.txt" | tr -d '\r' || true
           else
             echo "::warning::bs.exe 没构建出来 —— ④c 跳过（这一步是拿「出错指令 RVA」的通道）"
           fi
@@ -1020,13 +1028,15 @@ jobs:
             echo "⚠️ 上面这行的第一个数字是「通过过滤器的用例数」，不是跑过的数量；"
             echo "   但**没有** --first/--last 时两者相等，所以它 < 总数就说明循环中途结束了。"
             echo
-            echo "== 出错指令地址（④c：CLI 的 VEH 自报 —— **本轮的正主**）=="
-            echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）"
-            grep -a '崩溃自报\|出错指令\|RVA\|堆/映像' "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
+            echo "== 出错指令与调用链（④c：CLI 的 VEH 自报 —— **本轮的正主**）=="
+            echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）、调用链 ${frames_selftest:-?} 帧（应 ≥ 3）"
+            head -40 "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
             echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
-            grep -a '崩溃自报\|出错指令\|RVA\|堆/映像' "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
-            echo "→ 拿上面那个 RVA 配证据包里的 bs.map，用"
-            echo "  .workbuddy/tools/ciwatch/symbolicate.py bs.map <RVA>  就能翻出函数名。"
+            head -40 "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
+            echo "→ 出错位置写成了「模块名 + 0xRVA」，run #28 实测它**不一定是 bs.exe**。"
+            echo "  属于 bs.exe 的帧配证据包里的 bs.map 翻函数名："
+            echo "  .workbuddy/tools/ciwatch/symbolicate.py bs.map <RVA>"
+            echo "  别的模块只有模块名与 RVA，但调用链里属于 bs.exe 的那几帧足以指到出错代码。"
             echo
             echo "== WER（存档；⚠️ runner 上它一直是空的，别再把结论寄托在这）=="
             echo "两个 XML 的字节数: $(wc -c < "$bundle/wer-application-error.xml" 2>/dev/null || echo '?') / $(wc -c < "$bundle/wer-wer.xml" 2>/dev/null || echo '?')"
