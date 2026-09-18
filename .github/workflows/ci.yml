@@ -351,6 +351,59 @@ jobs:
             prefix_scan "$base_exe" 60
           fi
 
+          # ④g：把 `--last` 钉在崩溃点上，只往上收 `--first` —— 量"需要多长的前置"。
+          #
+          # run #43 的 ④f 给出：`--first=1 --last=56` **干净**、`--last=57` **崩**，
+          # 崩前最后一条用例名是「区段只允许表达式：赋值语句编译不过」。
+          # 但"这一段前置有多长是必需的"还没量出来：
+          #   * `--first=57 --last=57`（只跑这一条）也崩 ⇒ 这条用例**自身**足够，与顺序无关，
+          #     下轮就直接盯它做什么（尤其它与 CLI 那次不崩的差别：`sample_sources()`）；
+          #   * 只有 K 很小才崩 ⇒ 是**累积**效应，得再二分是哪几条在上面垫出来的。
+          # 顺便把 #55/#56/#57 的**名字**逐条打出来：诊断构建里那份编号对照可能与这里差一位，
+          # 而差一位会让"元凶"指错人。
+          #
+          # 与 ④f 同一个道理：**一行代码都不碰**，只用红点那份已经构建好的 binary。
+          trigger_scan() {  # $1=exe $2=崩溃的前缀上界（--last 固定用它）
+            local exe="$1" last="$2" k code nm
+            step_mark "④g 编号 → 用例名（先把编号与名字钉死，别再差一位）"
+            for k in $((last - 2)) $((last - 1)) "$last"; do
+              [ "$k" -ge 1 ] || continue
+              code=0
+              timeout 60 "$exe" --first="$k" --last="$k" -s -nv > "$outdir/one-$k.log" 2>&1 || code=$?
+              nm=$(grep -a '^TEST CASE:' "$outdir/one-$k.log" | head -1 | sed 's/^TEST CASE:[[:space:]]*//' || true)
+              if grep -qa 'test cases:' "$outdir/one-$k.log"; then
+                echo "矩阵 · ④g #$k = 「${nm:-?}」 退出码=$code 跑完=是"
+              else
+                echo "矩阵 · ④g #$k = 「${nm:-?}」 退出码=$code 跑完=**否（崩了）**"
+              fi
+            done
+
+            step_mark "④g 固定 --last=$last，只往上收 --first：找「最小仍需的前置」"
+            local smallest_bad=""
+            for k in "$last" $((last - 1)) $((last - 2)) $((last - 5)) $((last - 10)) $((last - 20)) 10 2 1; do
+              [ "$k" -ge 1 ] || continue
+              code=0
+              timeout 90 "$exe" --first="$k" --last="$last" -s -nv > "$outdir/range-$k.log" 2>&1 || code=$?
+              if grep -qa 'test cases:' "$outdir/range-$k.log"; then
+                echo "矩阵 · ④g [$k..$last] 退出码=$code 跑完=**是（不崩）**"
+              else
+                echo "矩阵 · ④g [$k..$last] 退出码=$code 跑完=**否（崩了）**"
+                smallest_bad="$k"
+              fi
+            done
+            # 上面是从大到小扫，最后一个"崩"的 k 就是**最小的起点**（越靠前越大 ⇒ 覆盖最广）
+            eval "g_smallest_bad=$smallest_bad"
+            echo "矩阵 · ④g 结论：最小的「仍会崩」起点 --first=${smallest_bad:-无}"
+          }
+          step_mark "④g 触发范围扫描：--last 钉在崩溃点，只收 --first"
+          if [ ! -s "$base_exe" ]; then
+            echo "::error::矩阵：④g 没有 $base_exe ⇒ 触发范围扫描做不了，本步结论作废"
+          elif [ -z "${prefix_first_bad:-}" ]; then
+            echo "矩阵 · ④g 跳过：④f 没找到会崩的前缀（60 以内），没有可钉的 --last"
+          else
+            trigger_scan "$base_exe" "$prefix_first_bad"
+          fi
+
           echo "===== 诊断矩阵汇总（跑完次数 / 5）====="
           echo "  V0 --preset ci 原样            : ${done_V0:-未跑}"
           echo "  V1 + MESSAGE_TRACE=ON          : ${done_V1:-未跑}"
@@ -358,8 +411,9 @@ jobs:
           echo "  V3 + BUILD_GUI=OFF             : ${done_V3:-未跑}"
           echo "  V2 的 CLI 侧（bs eval）退出码   : ${cli_V2:-未跑}"
           echo "  ④f 最小崩掉的前缀 --last=N      : ${prefix_first_bad:-没崩（60 以内）}"
+          echo "  ④g 最小的仍会崩的起点 --first=K : ${g_smallest_bad:-未定}"
           # 注解是 job 日志匿名读不到时唯一的通道
-          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}、V2-CLI 退出码 ${cli_V2:-?}、④f 最小崩前缀 ${prefix_first_bad:-无}"
+          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}、V2-CLI 退出码 ${cli_V2:-?}、④f 最小崩前缀 ${prefix_first_bad:-无}、④g 最小崩起点 ${g_smallest_bad:-无}"
           echo "  读法：V1 若 =5 而 V0/V2/V3 都 <5 ⇒ **就是那几行探针代码把红点遮住了**（编译期效应），"
           echo "        那么后续仪器必须搬出 core（放进测试可执行文件或独立进程），否则永远看不到它；"
           echo "        V2/V3 若也 =5 ⇒ 阴性对照失效，这台机器上每次构建的堆布局本来就在掷骰子，"
@@ -367,8 +421,9 @@ jobs:
           echo "        V2-CLI：非 0 且打出「崩溃自报」⇒ 同一次崩溃在 CLI 上也能复现，"
           echo "        下轮就照它的「模块 + RVA + 调用链」把 BatchResult::error 的析构钉到函数上；"
           echo "        退出码 1 且只打一行错误 ⇒ 这条路径本身是干净的，崩的是被别处踩坏的堆。"
-          echo "        ④f：有 N ⇒ 那条用例（及它前面那条）就是引入踩坏的点，下轮直接单跑它；"
-          echo "        没崩 ⇒ 红点与顺序无关，就在崩溃那条用例自己的作用域里。"
+          echo "        ④f：有 N ⇒ 触发点就在第 N 条用例（或它前一条的收尾）上，不需要更长的前缀。"
+          echo "        ④g：K = ④f 的 N ⇒ 那条用例**自身**足够，与顺序无关，下轮直接盯它；"
+          echo "            K 远小于 N ⇒ 是**累积**效应，下轮在 [K..N] 里二分找是哪几条垫出来的。"
 
       # CHM 帮助手册（Windows 原生帮助格式：双击即看、带左侧目录树）
       #
