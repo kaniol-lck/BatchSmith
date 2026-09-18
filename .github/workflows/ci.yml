@@ -935,6 +935,21 @@ jobs:
             fi
 
             set +e
+            # ---------- ④c-2：复现率 A/B（**同一份二进制，只差环境变量**） ----------
+            #
+            # 为什么要有这一道：run #36 / #37（**没有**写看门狗的那份二进制）都拿到了
+            # 「引用计数多减了一次」，而 run #38 / #39（**有**写看门狗）同一份代码连跑两轮
+            # 都干净（155/155 + 中止路径退出码 1）。1 比 2 的样本量分不开两种解释：
+            #   ① **运行时效应** —— 把那一页改成只读这件事本身把那一减挡住了；
+            #   ② **编译期效应** —— 新加的那几行代码改了代码/堆布局，bug 被遮住了。
+            # `BATCHSMITH_MESSAGE_PAGE_WATCH` 是**运行期**开关（sandbox.cpp 的 `page_watch_on()`）：
+            # 关着的时候 `arm_message_write_watch()` 立刻返回 —— 不 VirtualProtect、不跑自检、
+            # 不装页看门狗 VEH ⇒ **A 组在运行时与 run #37 那份二进制等价**。于是同一份
+            # 二进制跑两组、各 N 次，就能把 ① 与 ② 分开：
+            #   * A 脏、B 干净 ⇒ ①（那页只读才是遮住它的东西）
+            #   * 两组都脏     ⇒ ② 不成立，而且 B 组的命中行会**直接点名**那一减的模块 + RVA
+            #   * 两组都干净   ⇒ ②，得换一台不碰页保护的仪器（硬件写断点 DR0）
+            #
             # `BATCHSMITH_MESSAGE_TRACE=1` 是**探针的开关**：编译期只决定"实现存不存在"，
             # 这里才决定"打不打印"。分开两个开关是为了让同一次诊断构建里的单元测试
             # 不被打扰（它们也会跑到中止路径，默认关着就安静）。
@@ -943,12 +958,104 @@ jobs:
             # 发生在纯 Lua 长跳窗口里（没有一行 Qt 代码），日志切不动了，只能让写自己撞墙。
             # `..._SELFTEST=1` 先在一块自造内存上验证仪器真能拦下写（"没命中"与"没挂上"
             # 从日志上看是一样的，不先自证就没法解释）。
-            BATCHSMITH_MESSAGE_TRACE=1 \
-              BATCHSMITH_MESSAGE_PAGE_WATCH=1 \
-              BATCHSMITH_MESSAGE_PAGE_WATCH_SELFTEST=1 \
-              timeout 300 "$bs_exe" eval '$(function() while true do end end)()$' \
-              --list list1=a,b > "$bundle/run-cli-abort.txt" 2>&1
-            code_cli=$?
+            AB_N=${AB_N:-20}
+            abort_once() {  # $1=看门狗(1=挂/0=不挂) $2=输出文件
+              if [ "$1" = 1 ]; then
+                BATCHSMITH_MESSAGE_TRACE=1 \
+                  BATCHSMITH_MESSAGE_PAGE_WATCH=1 \
+                  BATCHSMITH_MESSAGE_PAGE_WATCH_SELFTEST=1 \
+                  timeout 300 "$bs_exe" eval '$(function() while true do end end)()$' \
+                  --list list1=a,b > "$2" 2>&1
+              else
+                BATCHSMITH_MESSAGE_TRACE=1 \
+                  timeout 300 "$bs_exe" eval '$(function() while true do end end)()$' \
+                  --list list1=a,b > "$2" 2>&1
+              fi
+            }
+            # 读一行的判据：同一个块在「raise 赋值之后」是 ref=2（成员 + 调用方临时对象），
+            # 到「lua_pcall 返回之后」变成 ref=1 就说明**有一减没有对应的持有者被析构**。
+            # ⚠️ 这个函数**不能在 `$( )` 里调**（那样赋值落在子 shell 里，`dirty` 丢不出来）。
+            abort_tally() {  # $1=组 $2=序号 $3=输出文件 $4=退出码 → 打一行，脏则把 dirty 置 1
+              ref_r=$(grep -a '探针 raise 赋值之后 / 成员' "$3" | head -1 \
+                | sed -n 's/.*头部\[ref=\([0-9-]*\).*/\1/p')
+              ref_l=$(grep -a '探针 lua_pcall 返回之后' "$3" | head -1 \
+                | sed -n 's/.*头部\[ref=\([0-9-]*\).*/\1/p')
+              dirty=0
+              state='读数缺失（探针没打出来）⇒ 这一次不计'
+              if [ -n "$ref_r" ] && [ -n "$ref_l" ]; then
+                state='引用计数正常'
+                if [ "$ref_l" -lt "$ref_r" ]; then
+                  state='← 引用计数少了一减'
+                  dirty=1
+                fi
+              fi
+              if grep -qa '崩溃自报' "$3"; then
+                state="$state + 当场 AV"
+              fi
+              echo "复现率 A/B · $1#$2 ref(raise)=${ref_r:-?} ref(lua_pcall)=${ref_l:-?} 退出码=$4 ⇒ $state"
+            }
+            dirty_a=0
+            dirty_b=0
+            crash_a=0
+            crash_b=0
+            missing=0
+            for grp in A B; do
+              if [ "$grp" = A ]; then watch=0; else watch=1; fi
+              i=1
+              while [ "$i" -le "$AB_N" ]; do
+                out="$RUNNER_TEMP/abort-$grp-$i.txt"
+                abort_once "$watch" "$out"
+                code=$?
+                echo "$code" > "$out.code"
+                dirty=0
+                abort_tally "$grp" "$i" "$out" "$code"
+                if [ -z "$(grep -a '探针 raise 赋值之后 / 成员' "$out" | head -1)" ] || [ -z "$(grep -a '探针 lua_pcall 返回之后' "$out" | head -1)" ]; then
+                  missing=$((missing + 1))
+                fi
+                if [ "$dirty" = 1 ]; then
+                  if [ "$grp" = A ]; then dirty_a=$((dirty_a + 1)); else dirty_b=$((dirty_b + 1)); fi
+                fi
+                if grep -qa '崩溃自报' "$out"; then
+                  if [ "$grp" = A ]; then crash_a=$((crash_a + 1)); else crash_b=$((crash_b + 1)); fi
+                fi
+                i=$((i + 1))
+              done
+            done
+            echo "复现率 A/B 汇总：A（看门狗运行时关）$dirty_a/$AB_N 次「少一减」、$crash_a 次当场 AV；B（看门狗全开）$dirty_b/$AB_N 次「少一减」、$crash_b 次当场 AV；读数缺失 $missing 次"
+            # 注解是 job 日志**匿名读不到**时唯一的通道（证据包那套就是这么来的）
+            echo "::notice::复现率 A/B：A ${dirty_a}/${AB_N}（AV ${crash_a}） · B ${dirty_b}/${AB_N}（AV ${crash_b}） · 读数缺失 ${missing}"
+            # 分组自证：这一道不做的话，"A 组其实也挂着看门狗"会让整轮 A/B 结论反过来
+            # （而日志上两组长得一模一样）。判据不能只看"有没有「已挂」"——
+            # **自检那一次也会打一条「已挂」**，所以只数 ≥1 的话，"真目标根本没挂上"
+            # 照样能过（本机预演就正好撞上这个：B 组真目标那次挂页后当场 SIGSEGV，
+            # 只剩自检那一条）。B 组正常应有 **2** 条：自检 + 真目标。
+            armed_a=$(grep -ac '写看门狗已挂' "$RUNNER_TEMP/abort-A-1.txt" || true)
+            armed_b=$(grep -ac '写看门狗已挂' "$RUNNER_TEMP/abort-B-1.txt" || true)
+            if [ "${armed_a:-0}" -ne 0 ] || [ "${armed_b:-0}" -lt 2 ]; then
+              echo "::error::A/B 分组没生效（A 组「已挂」${armed_a:-?} 条应为 0、B 组 ${armed_b:-?} 条应 ≥ 2：自检 + 真目标）⇒ 这一轮的 A/B 对比无意义；本站作业的问题"
+            else
+              echo "A/B 分组自证通过：A 组 0 条「已挂」、B 组 $armed_b 条（自检 + 真目标）⇒ 两组确实只差运行时是否挂看门狗"
+            fi
+            # 选一份进证据包：优先「当场 AV」的，其次「少了一减」的，都没有就留 A#1 当基准
+            pick=''
+            for f in "$RUNNER_TEMP"/abort-A-*.txt "$RUNNER_TEMP"/abort-B-*.txt; do
+              [ -f "$f" ] || continue
+              if grep -qa '崩溃自报' "$f"; then pick="$f"; break; fi
+            done
+            if [ -z "$pick" ]; then
+              for f in "$RUNNER_TEMP"/abort-A-*.txt "$RUNNER_TEMP"/abort-B-*.txt; do
+                [ -f "$f" ] || continue
+                r0=$(grep -a '探针 raise 赋值之后 / 成员' "$f" | head -1 \
+                  | sed -n 's/.*头部\[ref=\([0-9-]*\).*/\1/p')
+                r1=$(grep -a '探针 lua_pcall 返回之后' "$f" | head -1 \
+                  | sed -n 's/.*头部\[ref=\([0-9-]*\).*/\1/p')
+                if [ -n "$r0" ] && [ -n "$r1" ] && [ "$r1" -lt "$r0" ]; then pick="$f"; break; fi
+              done
+            fi
+            if [ -z "$pick" ]; then pick="$RUNNER_TEMP/abort-A-1.txt"; fi
+            cp "$pick" "$bundle/run-cli-abort.txt"
+            echo "选进证据包的那一份：$pick"
+            code_cli=$(cat "${pick}.code" 2>/dev/null || true)
             set -e
             bs_map=$(find build/diag -name 'bs.map' -type f -print -quit 2>/dev/null || true)
             if [ -n "$bs_map" ]; then
@@ -1015,8 +1122,13 @@ jobs:
             # 它是追"谁释放的"的主力 —— 不依赖任何堆/页 API（上一轮的 HeapSize 就是栽在那里）。
             watch_hits=$(grep -ac '^\[batchsmith\] ⚠️⚠️ Lua 分配器动了被盯的块' "$bundle/run-cli-abort.txt" || true)
             # 写看门狗（run #38 新加的）：自检段里的命中行必须 ≥1，否则"没命中"这个结论作废。
-            selftest_hits=$(awk '/写看门狗自检：目标=/{in_selftest=1} /写看门狗自检：写调用已返回/{in_selftest=0} /⚠️⚠️ 写看门狗命中/{if (in_selftest) n++} END{print n+0}' "$bundle/run-cli-abort.txt" 2>/dev/null || echo 0)
-            real_hits=$(awk '/写看门狗自检：写调用已返回/{after=1} /⚠️⚠️ 写看门狗命中/{if (after) n++} END{print n+0}' "$bundle/run-cli-abort.txt" 2>/dev/null || echo 0)
+            # ⚠️ 这两个数只能拿 **B 组**的输出来数：A 组按设计**在运行时把看门狗关掉了**
+            #    （这正是 A/B 要对比的东西），拿 A 组去数会得到 0，然后被误判成"仪器没挂上"。
+            watch_src="$RUNNER_TEMP/abort-B-1.txt"
+            [ -s "$watch_src" ] || watch_src="$bundle/run-cli-abort.txt"
+            echo "写看门狗读数取自：$watch_src"
+            selftest_hits=$(awk '/写看门狗自检：目标=/{in_selftest=1} /写看门狗自检：写调用已返回/{in_selftest=0} /⚠️⚠️ 写看门狗命中/{if (in_selftest) n++} END{print n+0}' "$watch_src" 2>/dev/null || echo 0)
+            real_hits=$(awk '/写看门狗自检：写调用已返回/{after=1} /⚠️⚠️ 写看门狗命中/{if (after) n++} END{print n+0}' "$watch_src" 2>/dev/null || echo 0)
             if [ "${probes:-0}" -eq 0 ]; then
               echo "::error::④c 一行探针都没有 ⇒ BATCHSMITH_MESSAGE_TRACE 没生效（本站作业的问题），本轮定不了「哪一步丢的消息」"
             else
@@ -1036,7 +1148,7 @@ jobs:
                 echo "写看门狗自检通过：自检段命中 $selftest_hits 行（仪器确实能拦下写）"
               fi
               echo "--- 写看门狗命中（真目标，共 ${real_hits:-0} 行）——**这几行就是「谁偷了那次引用」** ---"
-              awk '/写看门狗自检：写调用已返回/{after=1} after' "$bundle/run-cli-abort.txt" 2>/dev/null \
+              awk '/写看门狗自检：写调用已返回/{after=1} after' "$watch_src" 2>/dev/null \
                 | grep -a '^\[batchsmith\]' | head -30 | tr -d '\r' || true
               if [ "${real_hits:-0}" -eq 0 ]; then
                 echo "::warning::真目标上一次写都没命中 ⇒ 这段区间里没有写（或块根本没被动过）"
@@ -1140,25 +1252,44 @@ jobs:
             echo "    * run #36 又把区间切了一刀：raise 返回之后还健康，到「lua_pcall 返回之后」"
             echo "      就已经「读不动」⇒ 释放发生在 lua_pcall 内部（Lua 的错误传播）；"
             echo "      而 Lua 分配器看门狗 0 命中 ⇒ 不是沙箱的 Lua 分配器干的。"
-            echo "    * run #37 用「多持一份引用」把两种机制**切开**了："
-            echo "      - 中止分支不再崩（探针 5~7 全是「已提交/私有/读写」，拷贝那次自增完好）"
-            echo "        ⇒ 多拿的那一份确实把块救回来了；"
-            echo "      - 但块**照样**被释放（页最终翻成「已保留」、区域从 4K 并成 48K），崩溃顺势挪到"
-            echo "        **退出时那个 QString 的析构**（Qt6Core.dll + 0x418d = ~QString 里的引用计数写，"
-            echo "        调用链是 __scrt_common_main_seh + 0x176 ⇒ exit() 里跑静态析构、没有 main 帧）。"
+            echo "    * run #37 用「多持一份引用」把区间**夹住**了，而这一轮的读数（重读一遍原文）是："
+            echo "      - 赋值之前 参数 ref=1 → 赋值之后 参数/成员 ref=2 → limit_hook 成员 ref=2"
+            echo "        （= 成员 + 多持的那一份，说明那次赋值与多持**都自增了**，引用计数本身没算错）；"
+            echo "      - 到「lua_pcall 返回之后」ref 变**1**：此刻活着的持有者还是两个，所以这是一次"
+            echo "        **没有对应持有者被析构的减引用** —— 也就是「多减了一次」这句话的原始证据；"
+            echo "      - 副作用：中止分支不再崩（拷贝那次自增完好），但 ~Sandbox() 里成员析构时"
+            echo "        ref 由 1 减到 0 ⇒ 块**提前释放**；随后进程退出时那个多持的 QString 析构"
+            echo "        又去减已释放块的引用计数 ⇒ AV 落在 Qt6Core.dll + 0x418d（~QString），"
+            echo "        出错对象在 **bs.exe 的映像数据段**、调用链走 exit() 的静态析构"
+            echo "        （bs.exe + 0x738c6）⇒ 崩的就是那台诊断用的 static，不是产品代码。"
             echo "      ⇒ 合成一句可查的话：**消息块的引用计数被多减了一次**（偷走的正是"
             echo "        m_violation_message 那一份）—— 减到 0 就提前释放，之后谁再碰它谁 AV；"
             echo "        而在**普通堆**下同一块被释放两次 ⇒ 堆校验当场报 0xc0000374。"
             echo "        两个症状（AV 与 HEAP_CORRUPTION）至此归到同一条因上。"
             echo "      ⚠️ 本机（MinGW）这条路径上**没有**那一减（探针 5→6 的 ref 一直是 2）"
             echo "        ⇒ 只有 CI 的 MSVC + 官方 Qt 才有，只能在 CI 上抓。"
+            echo "    * run #38 / #39 是同一份代码连跑两轮，**两轮都干净**（155/155 + 中止路径"
+            echo "      退出码 1 + 探针 5→6 的 ref 一直是 2）⇒ 这就引出一个必须先解决的问题："
+            echo "      究竟是「写看门狗把那一减挡住了」（运行时效应）还是「新加的那几行代码改了"
+            echo "      代码/堆布局」（编译期效应）。1 比 2 的样本量分不开，于是有了下面这道 A/B。"
+            echo "    * 本轮的 A/B（④c-2）：**同一份二进制**，A 组只开探针（BATCHSMITH_MESSAGE_PAGE_WATCH"
+            echo "      在运行时关着 ⇒ 不 VirtualProtect、不跑自检、不装 VEH，行为等价于 run #37 那份），"
+            echo "      B 组全开；各跑 N 次，逐次记 ref 读数。读法："
+            echo "      - A 脏而 B 干净 ⇒ 是**那页只读**本身把那一减挡住的（运行时效应）⇒ 换一台"
+            echo "        不碰页保护的仪器（x64 的硬件写断点 DR0 盯块头 +0 那 4 字节）；"
+            echo "      - 两组都脏 ⇒ 编译期效应不成立，而且 B 组的命中行会**直接点名**那一减的模块 + RVA；"
+            echo "      - 两组都干净 ⇒ 是编译期效应（布局），得回到「仪器越少越好」的思路重做。"
             echo "    * 那一减发生在 raise() 返回之后、lua_pcall 返回之前（ref 2→1），而那一段里"
             echo "      **没有一行 Qt 代码**（纯 luaL_error 长跳 + Lua 的错误传播）⇒ 探针切不动了，"
-            echo "      改成让那次写自己撞墙：写看门狗把消息块所在整页改成只读，任何写它的指令当场 AV，"
+            echo "      写成让那次写自己撞墙：写看门狗把消息块所在整页改成只读，任何写它的指令当场 AV，"
             echo "      VEH 里报出**模块 + RVA**（外部模块用 pe_rva.py、主模块用 symbolicate.py 翻符号）；"
             echo "      报完恢复可写并用单步重挂，最多报 6 次 ⇒ 日志里能按时间顺序看到一串写。"
             echo "★ 读本轮日志的顺序："
-            echo "  1) 先看「写看门狗自检」那段有没有命中 —— 没有命中就说明仪器根本没挂上，"
+            echo "  0) 先看「复现率 A/B 汇总」与那条同名注解 —— 它决定这一轮属于上面哪一种情形，"
+            echo "     也决定下一轮该用哪台仪器；A/B 各自的「少一减」次数与「当场 AV」次数都在上面；"
+            echo "     再看「A/B 分组自证通过」那行：A 组必须是 0 条「已挂」、B 组 ≥ 1 条，"
+            echo "     否则两组其实一样，这轮的对比结论一律不作数；"
+            echo "  1) 再看「写看门狗自检」那段有没有命中 —— 没有命中就说明仪器根本没挂上，"
             echo "     后面的「没命中」一律不作数；"
             echo "  2) 再看「写看门狗命中」落在**哪两个探针行之间**："
             echo "     - 落在「limit_hook：raise 返回之后」与「lua_pcall 返回之后」之间的那条，"
