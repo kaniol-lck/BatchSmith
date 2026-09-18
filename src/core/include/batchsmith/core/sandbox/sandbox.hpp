@@ -113,6 +113,22 @@ public:
 
     [[nodiscard]] QString violation_message() const { return m_violation_message; }
 
+    /// 诊断用：把 `m_violation_message` 的**数据块所在页的性质**打到 stderr。
+    ///
+    /// 为什么需要它（run #32 的现场）：崩溃点是 Qt 的 `QString` 拷贝构造里对源对象
+    /// 的 `d` 做引用计数自增（`lock xadd`），源对象正是 `m_violation_message`，
+    /// 而它的三件套**完全自洽**（`ptr == d + 16`、`size == 17`，正好等于
+    /// 「指令数超过上限（20000000）」的长度）—— 只有 `d` 所在的页是
+    /// **已保留但未提交**，于是那句 `lock xadd` 当场 AV。
+    /// 也就是说：不是因为对象被踩坏，而是**它指向的内存已经不属于我们了**。
+    /// 那么问题只剩一个 —— **是在 `raise()` 赋值时就坏的，还是之后被释放的？**
+    /// 在"注入列表之后 / raise 赋值之后 / 拷贝之前"各打一个点，一次就能二分出来。
+    ///
+    /// ⚠️ 只在诊断构建里有实现（`BATCHSMITH_MESSAGE_TRACE`），且还要环境变量
+    /// `BATCHSMITH_MESSAGE_TRACE=1` 才真的打印 —— 否则同一次构建里的单元测试
+    /// 会被这条探针刷屏。非诊断构建下是空调用，零开销。
+    void trace_violation_message(const char* where) const;
+
     void clear_violation();
 
     // ---- 供 helper 内部使用 ----

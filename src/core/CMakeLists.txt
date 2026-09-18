@@ -58,3 +58,11 @@ target_link_libraries(batchsmith_core PRIVATE batchsmith_warnings)
 if(BATCHSMITH_ALLOC_AUDIT)
     target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_ALLOC_AUDIT=1)
 endif()
+
+# 诊断开关：给 Sandbox::m_violation_message 打「页面性质」追踪点（见 sandbox.cpp 的
+# trace_violation_message）。用途是查 Windows Release 下 QString 数据块被提前释放的问题：
+# 在「注入列表之后 / raise 赋值之后 / 拷贝之前」各看一眼，就能二分出坏在哪一步。
+# 只在 Windows 上有效（用 VirtualQuery），且默认关闭 —— 它会在正常路径上多跑几次系统调用。
+if(BATCHSMITH_MESSAGE_TRACE)
+    target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_MESSAGE_TRACE=1)
+endif()

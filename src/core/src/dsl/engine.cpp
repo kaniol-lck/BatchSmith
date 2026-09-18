@@ -117,6 +117,7 @@ BatchResult evaluate_template(const QString& template_text,
     }
     box.set_phase("eval.inject_lists");
     box.inject_lists(sources);
+    box.trace_violation_message("注入列表之后（还没跑任何 Lua）");
 
     lua_State* state = box.state();
     box.set_phase("eval.load");
@@ -159,6 +160,8 @@ BatchResult evaluate_template(const QString& template_text,
                     lua_tostring(state, -1) == nullptr ? "求值失败" : lua_tostring(state, -1));
             if (box.violation() != sandbox::Violation::None) {
                 // 限制被触发：宿主侧标记优先 —— 脚本里 pcall 吞掉错误也照样中止整批
+                // 诊断探针：与 raise() 里那一次对起来看，就知道消息的数据块是在哪一步丢的。
+                box.trace_violation_message("中止分支：拷贝之前");
                 result.error = QStringLiteral("已中止：%1").arg(box.violation_message());
             } else {
                 result.error = describe_error(compiled, raw);

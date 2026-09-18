@@ -6,6 +6,18 @@
 #if defined(BATCHSMITH_ALLOC_AUDIT)
 #include <unordered_map>
 #endif
+// 诊断探针（见 Sandbox::trace_violation_message 的说明）：要问"这一页还在不在"，
+// Windows 上只有 VirtualQuery 说得清。**只在诊断构建里编进来**，
+// 免得给"core 只依赖 QtCore"这条约定开一个口子。
+#if defined(BATCHSMITH_MESSAGE_TRACE) && defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 extern "C" {
 #include "lauxlib.h"
@@ -406,6 +418,7 @@ void Sandbox::raise(Violation kind, const QString& message) {
     if (m_violation == Violation::None) {
         m_violation = kind;
         m_violation_message = message;
+        trace_violation_message("raise 赋值之后");
     }
 }
 
@@ -413,6 +426,118 @@ void Sandbox::clear_violation() {
     m_violation = Violation::None;
     m_violation_message.clear();
 }
+
+#if defined(BATCHSMITH_MESSAGE_TRACE) && defined(_WIN32)
+
+namespace {
+
+/// 探针开关（环境变量只读一次）。默认**关**：同一次诊断构建里的单元测试也会跑到
+/// 中止路径，探针若默认打开会把测试输出刷得没法看。
+bool message_trace_on() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("BATCHSMITH_MESSAGE_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+/// 地址所在页的性质：状态 / 类型 / 保护 / 区域大小。
+///
+/// `已保留` 与 `已提交` 的区别就是这一轮的关键：前者表示"这块地址属于某个保留区、
+/// 但页没有提交"，写上去必然 AV；`空闲` 则是彻底还给系统了。
+void describe_page(const void* address, char* out, std::size_t out_size) {
+    if (address == nullptr) {
+        std::snprintf(out, out_size, "空指针");
+        return;
+    }
+    MEMORY_BASIC_INFORMATION mbi;
+    std::memset(&mbi, 0, sizeof(mbi));
+    if (::VirtualQuery(address, &mbi, sizeof(mbi)) == 0) {
+        std::snprintf(out, out_size, "不可查询");
+        return;
+    }
+    const char* state = "?";
+    if (mbi.State == MEM_COMMIT) {
+        state = "已提交";
+    } else if (mbi.State == MEM_RESERVE) {
+        state = "已保留";
+    } else if (mbi.State == MEM_FREE) {
+        state = "空闲";
+    }
+    const char* type = "";
+    if (mbi.Type == MEM_PRIVATE) {
+        type = "/私有";
+    } else if (mbi.Type == MEM_IMAGE) {
+        type = "/映像";
+    } else if (mbi.Type == MEM_MAPPED) {
+        type = "/映射";
+    }
+    const char* protect = "";
+    if (mbi.State == MEM_COMMIT) {
+        if ((mbi.Protect & PAGE_GUARD) != 0) {
+            protect = "/守卫页";
+        } else if ((mbi.Protect & PAGE_NOACCESS) != 0) {
+            protect = "/不可访问";
+        } else if ((mbi.Protect & PAGE_READWRITE) == PAGE_READWRITE) {
+            protect = "/读写";
+        } else if ((mbi.Protect & PAGE_READONLY) == PAGE_READONLY) {
+            protect = "/只读";
+        } else {
+            protect = "/其它保护";
+        }
+    }
+    std::snprintf(out,
+                  out_size,
+                  "%s%s%s 区域 %lluK",
+                  state,
+                  type,
+                  protect,
+                  static_cast<unsigned long long>(mbi.RegionSize / 1024));
+}
+
+}  // namespace
+
+void Sandbox::trace_violation_message(const char* where) const {
+    if (!message_trace_on()) {
+        return;
+    }
+    // ⚠️ 探针里**不能**写 `const QString copy = m_violation_message;` —— 探针自己就会做一次
+    //    引用计数自增，万一消息已经悬垂，它就会**抢在真正的位置之前崩掉**，
+    //    于是"崩在探针里"看起来像"探针有问题"，最该看的那条信息反而丢了。
+    //    所以这里只读指针与长度，全程不碰引用计数。
+    const QChar* data = m_violation_message.constData();
+    // Qt6 的 QArrayData 头是 16 字节、QChar 是 2 字节 ⇒ 头部指针 = data - 8（个 QChar）。
+    // 这个布局由崩溃自报的实测独立确认过：`ptr == d + 0x10`。
+    const void* header = data != nullptr ? static_cast<const void*>(data - 8) : nullptr;
+    char data_page[80];
+    char header_page[80];
+    describe_page(data, data_page, sizeof(data_page));
+    describe_page(header, header_page, sizeof(header_page));
+    static const void* previous = nullptr;
+    const char* moved = "首见";
+    if (data != nullptr && previous == data) {
+        moved = "未变";
+    } else if (previous != nullptr) {
+        moved = "**变了**";
+    }
+    previous = data;
+    std::fprintf(stderr,
+                 "[batchsmith] 探针 %s：数据=%p（%s） 头部=%p（%s） 长度=%lld 指针%s\n",
+                 where,
+                 static_cast<const void*>(data),
+                 data_page,
+                 header,
+                 header_page,
+                 static_cast<long long>(m_violation_message.size()),
+                 moved);
+    std::fflush(stderr);
+}
+
+#else
+
+void Sandbox::trace_violation_message(const char*) const {}
+
+#endif  // BATCHSMITH_MESSAGE_TRACE && _WIN32
 
 void Sandbox::install_libraries() {
     // 基础库只放一个**白名单子集**：ADR-6 列的是「手工打开哪几张库」，
