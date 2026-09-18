@@ -156,6 +156,10 @@ BatchResult evaluate_template(const QString& template_text,
         lua_rawgeti(state, LUA_REGISTRYINDEX, function_ref);
         // 不传参：i / rows 由 env 注入（见 compiler.hpp 的第 0 条）
         if (lua_pcall(state, 0, segment_count, 0) != LUA_OK) {
+            // 诊断探针：把「raise 返回 → 中止分支」这一段再切一刀。
+            // 此刻 `lua_pcall` 刚返回、**还没**构造下面的 `raw`，所以这一次读数能区分
+            // 「释放发生在 Lua 的错误传播里」与「发生在引擎这几行里」。
+            box.trace_violation_message("lua_pcall 返回之后（还没构造 raw）");
             const QString raw = QString::fromUtf8(
                     lua_tostring(state, -1) == nullptr ? "求值失败" : lua_tostring(state, -1));
             if (box.violation() != sandbox::Violation::None) {

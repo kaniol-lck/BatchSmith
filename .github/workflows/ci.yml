@@ -1003,14 +1003,19 @@ jobs:
             # 缺一行，二分的区间就断在那里；**一行都没有**更坏：探针在关掉时是空实现，
             # 日志看起来照样正常，于是"探针没说话"极易被误读成"消息一直是好的"。
             probes=$(grep -ac '^\[batchsmith\] 探针 ' "$bundle/run-cli-abort.txt" || true)
+            # 看门狗：沙箱自己的 Lua 分配器只要碰了「消息的数据块」，就会喊一声。
+            # 它是追"谁释放的"的主力 —— 不依赖任何堆/页 API（上一轮的 HeapSize 就是栽在那里）。
+            watch_hits=$(grep -ac '^\[batchsmith\] ⚠️⚠️ Lua 分配器动了被盯的块' "$bundle/run-cli-abort.txt" || true)
             if [ "${probes:-0}" -eq 0 ]; then
               echo "::error::④c 一行探针都没有 ⇒ BATCHSMITH_MESSAGE_TRACE 没生效（本站作业的问题），本轮定不了「哪一步丢的消息」"
             else
-              echo "--- 探针（共 $probes 行，期望 ≥ 6 行）---"
+              echo "--- 探针（共 $probes 行，期望 ≥ 7 行）---"
               grep -a '^\[batchsmith\] 探针 ' "$bundle/run-cli-abort.txt" | tr -d '\r' || true
-              if [ "$probes" -lt 6 ]; then
-                echo "::warning::探针只打出 $probes 行（期望 ≥ 6）⇒ 二分的区间不完整：看它停在哪一步之前"
+              if [ "$probes" -lt 7 ]; then
+                echo "::warning::探针只打出 $probes 行（期望 ≥ 7）⇒ 二分的区间不完整：看它停在哪一步之前"
               fi
+              echo "--- 看门狗（共 ${watch_hits:-0} 行；≥1 就说明是 Lua 分配器把消息的块动掉了）---"
+              grep -a '^\[batchsmith\] ⚠️⚠️ Lua 分配器动了被盯的块' "$bundle/run-cli-abort.txt" | tr -d '\r' || true
             fi
           else
             echo "::warning::bs.exe 没构建出来 —— ④c 跳过（这一步是拿「出错指令 RVA」的通道）"
@@ -1096,15 +1101,17 @@ jobs:
             echo "== 出错指令与调用链（④c：CLI 的 VEH 自报 —— **本轮的正主**）=="
             echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）、调用链 ${frames_selftest:-?} 帧（应 ≥ 3）、寄存器行 ${regs_selftest:-?} 条（应 ≥ 1）"
             head -60 "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
-            echo "消息追踪探针: ${probes:-0} 行（期望 ≥ 6）"
+            echo "消息追踪探针: ${probes:-0} 行（期望 ≥ 7）；看门狗命中: ${watch_hits:-0} 行"
             echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
             head -60 "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
             echo "→ 每行格式：[batchsmith] 探针 <时点> / <看的是谁>：数据=<指针>（页性质） 头部[ref/size/flags]"
             echo "  时点按时间顺序：注入列表之后 → raise 赋值之前(参数) → raise 赋值之后(参数/成员)"
-            echo "                  → limit_hook：raise 返回之后(成员) → 中止分支：拷贝之前(成员)"
+            echo "                  → limit_hook：raise 返回之后(成员) → lua_pcall 返回之后(成员)"
+            echo "                  → 中止分支：拷贝之前(成员)"
             echo "  判据（引用计数这一列是关键）："
             echo "    * raise 赋值之前 参数 ref=1，赋值之后 参数与成员 ref=2 且指针相同 ⇒ 引用计数算对了；"
             echo "      若赋值之后仍是 ref=1 ⇒ 「这次赋值没自增」，临时析构会把块减到 0 并释放 —— 凶手即此处。"
+            echo "      （run #35 实测这一段是 1→2→1，全部正常 ⇒ 引用计数不是凶手。）"
             echo "    * 页性质从「已提交/私有/读写」翻成「已保留/空闲」的那一步就是释放发生的区间；"
             echo "      ⚠️ 本机实测（.workbuddy/tools/pageprobe/）：「已保留」= 读写都当场 AV，"
             echo "      所以「已保留」与「成功读出内容」不可能同时为真 —— 一行里若两者并现，"
@@ -1112,6 +1119,11 @@ jobs:
             echo "      ⚠️ 同理，「读不动（页不可读）」是**探针自己判出来的**（先判可读再读），"
             echo "      它不是故障、而是「这一页确实没了」的正面证据。"
             echo "    * 页性质没翻、ref 却从 2 掉到 1 ⇒ 只是临时对象正常析构，一切健康。"
+            echo "  ★ 看门狗那行（⚠️⚠️）是回答「谁释放的」的主力："
+            echo "    沙箱自己的 Lua 分配器每次调用都会与「消息块首 ± 64 字节」比一次，命中就喊。"
+            echo "    「释放」+ 偏移 16（正好是 QString 的数据指针）⇒ 就是 Lua 分配器释放了它；"
+            echo "    一条都没有 ⇒ 释放者不是 Lua 分配器，得往别的方向找（但要先确认看门狗真挂上了："
+            echo "    探针里「raise 赋值之后 / 成员」那行之后才挂，早于它的命中不会报）。"
             echo "  ⚠️ 上一轮试过用 HeapSize 当第二条独立证据，**已被否决别再加回来**："
             echo "     它收到块内部地址（不是块首）时不返回 -1，而是**当场抛 0xc0000374**，"
             echo "     于是那个「取证工具」自己制造了要取证的故障（run #34 整轮结论作废）。"

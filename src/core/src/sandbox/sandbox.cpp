@@ -173,8 +173,88 @@ void alloc_audit_report_leaks(const char* where) {
 
 #endif  // BATCHSMITH_ALLOC_AUDIT
 
+#if defined(BATCHSMITH_MESSAGE_TRACE) && defined(_WIN32)
+
+namespace {
+
+/// 探针开关（环境变量只读一次）。默认**关**：同一次诊断构建里的单元测试也会跑到
+/// 中止路径，探针若默认打开会把测试输出刷得没法看。
+bool message_trace_on() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("BATCHSMITH_MESSAGE_TRACE");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
+/// 诊断看门狗：记下「消息数据块的首地址」，之后**只要沙箱自己的 Lua 分配器碰了这块内存，
+/// 就当场报出来**（含精确的偏移）。
+///
+/// 为什么需要它（run #35 把区间缩到了这一步）：探针读数证明
+///   赋值前 ref=1 → 赋值后 ref=2 → 临时析构后 ref=1（页仍是"已提交/读写"）
+///   → 而进入中止分支时，**同一指针**所在的页已经变成"已保留/私有"、探针直接读不动。
+/// 也就是说：引用计数这一路完全正常，块是在 `raise()` 返回之后、中止分支之前被释放的
+/// —— 那一段全是 Lua 的错误传播（`luaL_error` 长跳 → `luaD_pcall` → 回到引擎）。
+/// 那段时间里唯一会主动 `free` 的就只有**我们自己的 Lua 分配器**，所以直接盯它：
+/// 只看它有没有拿到这个地址，比事后去猜"谁释放的"省事得多，也**不依赖任何堆/页 API**
+/// （⚠️ 上一轮的 `HeapSize` 就是栽在"依赖堆 API"上，见下方那条被否决的经验）。
+struct Watchdog {
+    const char* block = nullptr;
+    std::size_t bytes = 0;
+};
+
+Watchdog& watchdog() {
+    static Watchdog instance;
+    return instance;
+}
+
+/// 把 `data`（`QString` 的数据指针）换算成块首并开始盯它。
+void watch_block(const QChar* data) {
+    if (!message_trace_on() || data == nullptr) {
+        return;
+    }
+    watchdog().block = reinterpret_cast<const char*>(data) - 16;  // 块首 = d = data - 16
+    watchdog().bytes = 64;
+}
+
+/// 分配器每次调用都过一道：命中了就报一行（没命中时零开销之外只有一次比较）。
+void watch_report(const char* what, const void* address, std::size_t arg1, std::size_t arg2) {
+    if (!message_trace_on()) {
+        return;
+    }
+    const Watchdog& w = watchdog();
+    if (w.block == nullptr || address == nullptr) {
+        return;
+    }
+    const char* p = static_cast<const char*>(address);
+    if (p < w.block || p >= w.block + w.bytes) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "[batchsmith] ⚠️⚠️ Lua 分配器动了被盯的块：%s ptr=%p 块首=%p 偏移=%lld "
+                 "(old=%zu new=%zu)\n",
+                 what,
+                 address,
+                 static_cast<const void*>(w.block),
+                 static_cast<long long>(p - w.block),
+                 arg1,
+                 arg2);
+    std::fflush(stderr);
+}
+
+}  // namespace
+
+#define BATCHSMITH_WATCH(what, ptr, a, b) watch_report(what, ptr, a, b)
+
+#else
+
+#define BATCHSMITH_WATCH(what, ptr, a, b) ((void)0)
+
+#endif  // BATCHSMITH_MESSAGE_TRACE && _WIN32
+
 /// 带计数与上限的分配器。超限返回 nullptr ⇒ Lua 抛 LUA_ERRMEM。
 void* tracked_allocator(void* ud, void* ptr, size_t old_size, size_t new_size) {
+    BATCHSMITH_WATCH(new_size == 0 ? "释放" : "重分配", ptr, old_size, new_size);
     auto* state = static_cast<lua_State*>(ud);
     if (state == nullptr) {
         // lua_newstate 期间 ud 还是 nullptr（随后用 lua_setallocf 补上）：
@@ -214,6 +294,7 @@ void* tracked_allocator(void* ud, void* ptr, size_t old_size, size_t new_size) {
     }
 
     void* block = std::realloc(ptr, new_size);
+    BATCHSMITH_WATCH("realloc 返回的块", block, 0, new_size);
     if (block != nullptr) {
         account.bytes += static_cast<qsizetype>(new_size) - static_cast<qsizetype>(old_size);
     }
@@ -444,16 +525,6 @@ void Sandbox::clear_violation() {
 
 namespace {
 
-/// 探针开关（环境变量只读一次）。默认**关**：同一次诊断构建里的单元测试也会跑到
-/// 中止路径，探针若默认打开会把测试输出刷得没法看。
-bool message_trace_on() {
-    static const bool enabled = [] {
-        const char* value = std::getenv("BATCHSMITH_MESSAGE_TRACE");
-        return value != nullptr && value[0] == '1';
-    }();
-    return enabled;
-}
-
 /// 地址所在页的性质：状态 / 类型 / 保护 / 区域大小。
 ///
 /// `已保留` 与 `已提交` 的区别就是这一轮的关键：前者表示"这块地址属于某个保留区、
@@ -600,10 +671,22 @@ void Sandbox::trace_message(const char* where, const char* label, const QString&
     const QChar* data = value.constData();
     char page[80];
     describe_page(data, page, sizeof(page));
-    const HeaderWords words = read_header(data);
+    // ⚠️ 空 `QString` 的 `data` 指向 Qt 的**静态空数据**，而它的 `offset` 与普通堆块不同
+    //    （本机实测：`data - 16` 落在静态数据前面，读出来是 `ref=1313431379` 这种垃圾）。
+    //    所以空串一律不读头 —— 我们关心的永远是那条真实的中止消息，空串只是个基准点。
+    //    这一条是**仪器自检**发现的（本机 MinGW 上跑一遍，发现第一行的 header 明显不是头）。
+    const bool header_applicable = !value.isEmpty();
+    const HeaderWords words = header_applicable ? read_header(data) : HeaderWords{};
+    // 顺手把看门狗挂到这块内存上 —— 这样即便后面的流程把块释放掉，
+    // 也是由**分配器**当场喊出来，而不是等我们事后去反推。
+    if (header_applicable) {
+        watch_block(data);
+    }
 
     char header[160];
-    if (words.readable) {
+    if (!header_applicable) {
+        std::snprintf(header, sizeof(header), "（空串：无数据头可读）");
+    } else if (words.readable) {
         std::snprintf(header,
                       sizeof(header),
                       "ref=%d size=%d flags=0x%08X",
