@@ -931,6 +931,37 @@ jobs:
             else
               echo "::warning::没找到 bs.map（/MAP 可能没生效）—— 有 RVA 也没有函数名可翻"
             fi
+
+            # ---------- 把**产物本身**也带回来 ----------
+            #
+            # 为什么：run #28 / #30 的实测是**出错指令不在 `bs.exe` 里**（`Qt6Core.dll + 0x10860`，
+            # 两轮同一个 RVA）。而那份 .map 只覆盖 `bs.exe` 自己 ⇒ 外部模块的 RVA 拿什么也翻不了。
+            # 把那个 DLL 带回来，就能用它的**导出表**把 RVA 折成 Qt 的函数名（本机没有 MSVC 版 Qt）。
+            # `bs.exe` 也一起带上：调用点上真正 `call` 了谁，只有看它的反汇编才说得清。
+            #
+            # ⚠️ 产物一律**去找**，不假定落点（上一轮就因为"假定某文件一定在"白扔过一轮）。
+            cp "$bs_exe" "$bundle/bs.exe" 2>/dev/null || echo "::warning::拷 bs.exe 进证据包失败"
+            qt_core=""
+            for cand in "${QT_ROOT_DIR:-}/bin/Qt6Core.dll" build/diag/bin/Qt6Core.dll; do
+              if [ -n "$cand" ] && [ -f "$cand" ]; then qt_core="$cand"; break; fi
+            done
+            if [ -z "$qt_core" ]; then
+              qt_core=$(find build/diag "${QT_ROOT_DIR:-/nonexistent}" -name 'Qt6Core.dll' \
+                -type f -print -quit 2>/dev/null || true)
+            fi
+            if [ -n "$qt_core" ] && [ -f "$qt_core" ]; then
+              cp "$qt_core" "$bundle/Qt6Core.dll" && echo "带上 Qt6Core.dll：$qt_core"
+            else
+              echo "::warning::没找到 Qt6Core.dll —— 出错模块只剩「模块名 + RVA」，翻不了函数名"
+            fi
+            # 自证（这一道是拿真金白银换来的）：这俩是本轮唯一的"位置"来源，缺一个就白跑一轮
+            for f in bs.exe Qt6Core.dll; do
+              if [ -s "$bundle/$f" ]; then
+                echo "已入包：$f（$(stat -c%s "$bundle/$f") 字节）"
+              else
+                echo "::warning::证据包里没有 $f（缺失或 0 字节）⇒ 这一轮翻不了外部模块的函数名"
+              fi
+            done
             echo "CLI 中止路径（PageHeap 下）：退出码 $code_cli"
             # ⚠️ 退出码在这里是**残缺**的：bash 对无法映射到信号的 NTSTATUS 一律报 127，
             #    所以 127 既可能是"命令没找到"也可能是"0xC0000374"。判据改用**输出内容**：

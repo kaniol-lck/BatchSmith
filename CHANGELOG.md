@@ -304,6 +304,26 @@
   采集侧同步：`symbolicate.py` 新增 `--frames`，逐帧翻符号。⚠️ **调用链里 #1 起都是
   返回地址（`call` 的下一条），必须按 `RVA - 1` 查**，否则会翻到相邻函数上去，
   而且看起来还挺像那么回事 —— 这类错误从输出上读不出来。
+- ⭐ **诊断结论（run #30，`08da586`）：崩溃点定位到 `dsl::evaluate_template` 里一次对
+  `Qt6Core.dll` 的调用。** 升级后的自报一次给全了调用链：
+  ```
+  异常码 0xc0000005  **写** 地址 0x19c046c6fc0（垃圾地址）
+  所在模块 : Qt6Core.dll + 0x10860（**外部模块**）
+    #0  Qt6Core.dll + 0x10860      ← 出错指令
+    #1  bs.exe + 0x1d145  ⇒ dsl::evaluate_template（engine.cpp）
+    #2  bs.exe + 0x6f65   ⇒ run_eval            （main.cpp）
+    #3  bs.exe + 0x83fb   ⇒ main
+  ```
+  `#0` 的 RVA 与 run #28 **完全相同**（`0x10860`）⇒ 确定性行为，不是随机踩内存。
+  对应源码位置是沙箱中止后的错误分支（`QStringLiteral("已中止：%1").arg(...)`）。
+  ⚠️ 但**外部模块的 RVA 用 `bs.map` 翻不了**（那份 map 只覆盖 `bs.exe`）⇒ 证据包现在
+  把 **`bs.exe` 与 `Qt6Core.dll` 本身**一起带回来，好查它们的**导出表**。
+- **`pe_rva.py`：从 PE 里查「这个 RVA 落在哪个函数里」**（本机没有 MSVC 版 Qt，
+  只能把 DLL 带回来自己查）。⚠️ 导出表里 `AddressOfFunctions` 按**序号**排、
+  `AddressOfNames` 按**字典序**排，两者靠 `AddressOfNameOrdinals` 关联 ——
+  照 `objdump -p` 的行号对齐就是张冠李戴（名字看着都挺合理，从输出上读不出来）。
+  工具内置 **`.pdata` 交叉自证**：导出函数的 RVA 应当正好是某个函数起点，
+  实测本机 Qt6Core.dll 为 **91.9%（5311/5778）**；若两张表错位，这个比例会塌。
 
 ### 修复
 
