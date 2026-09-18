@@ -210,8 +210,14 @@ jobs:
           probe_variant() {  # $1=变体名 $2=exe
             local name="$1" exe="$2" ok=0 i=1 code last
             while [ "$i" -le 5 ]; do
-              timeout 300 "$exe" -s -nv > "$outdir/$name-$i.log" 2>&1
-              code=$?
+              # ⚠️ `|| code=$?` 不能省：被测用例崩掉时返回的是 bash **无法映射到信号**的
+              # NTSTATUS —— 0xc0000374 一律报 127，而本步的 shell 是 `bash -e`
+              # （Actions 的 bash 默认带 -e），不接住的话 `-e` 会在取到退出码之前就把
+              # **整步**打断。run #41 实测：V0 第一次跑就崩，注解里只剩 "exit code 127"，
+              # 矩阵一条结果都没打出来。与 memory 里那条「$? 的 127 有歧义
+              # （命令找不到 / 未映射 NTSTATUS）」是同一件事。
+              code=0
+              timeout 300 "$exe" -s -nv > "$outdir/$name-$i.log" 2>&1 || code=$?
               last=$(grep -a '^TEST CASE:' "$outdir/$name-$i.log" | tail -1 | sed 's/^TEST CASE:[[:space:]]*//' || true)
               if grep -qa 'test cases:' "$outdir/$name-$i.log"; then
                 ok=$((ok + 1))
@@ -249,6 +255,38 @@ jobs:
             probe_variant "$name" "$exe"
           }
 
+          # ④e：同一条出错路径，从 **CLI** 再走一遍。
+          #
+          # 为什么非做不可：`batchsmith_tests` 崩掉时**什么都不打** —— 它没有崩溃自报，
+          # 而 WER / LocalDumps 在 runner 上根本不产事件（「内存证据包」里已实测到两个 XML
+          # 都是 0 字节），所以"崩在哪个函数"这条线索在测试二进制上永远拿不到。
+          # `bs.exe` 自带崩溃自报（VEH）：崩了会打印**出错指令的「模块 + RVA + 调用链」**，
+          # 这正是把 `BatchResult::error` 这次析构钉到具体函数上所需要的东西。
+          #
+          # 用 V2 的构建目录（只多一个 CRASH_REPORT=ON，**core 与红点同码**），
+          # 所以这条 CLI 结论可以回推到测试二进制那次崩溃上。
+          cli_probe() {  # $1=变体名（要有 CRASH_REPORT，且已配置过）
+            local name="$1" bcode=0 ccode=0
+            # 同样要接住退出码（同上：`bash -e` 撞上未映射的 NTSTATUS 会打断整步）
+            cmake --build "build/$name" --target bs --parallel > "$outdir/$name-bs-build.log" 2>&1 || bcode=$?
+            if [ "$bcode" -ne 0 ]; then
+              echo "矩阵 · $name CLI：bs 目标没构建成功（退出码 $bcode）⇒ CLI 侧无结论"
+              tail -5 "$outdir/$name-bs-build.log" | while IFS= read -r l; do echo "::warning::$l"; done
+              return 0
+            fi
+            local bs="build/$name/bin/bs.exe"
+            if [ ! -s "$bs" ]; then
+              echo "矩阵 · $name CLI：没产出 $bs ⇒ CLI 侧无结论"
+              return 0
+            fi
+            # 与 ctest 里崩掉的那个用例同一条模板（test_engine.cpp:180 `$x = 1$`）
+            "$bs" eval '$x = 1$' --list list1=a,b > "$outdir/$name-cli.log" 2>&1 || ccode=$?
+            eval "cli_${name}=$ccode"
+            echo "矩阵 · $name CLI：bs eval 退出码=$ccode（0=没崩；非 0 且打出「崩溃自报」即命中）"
+            sed -n '1,24p' "$outdir/$name-cli.log" | while IFS= read -r l; do echo "  cli| $l"; done
+            return 0
+          }
+
           step_mark "④d 基线：原样的 --preset ci（红点本体）"
           # 基线 exe 也要自证：它不存在时 probe_variant 会把每一跑都判成"崩了"，
           # 于是"V0 = 0/5 跑完"看起来像"红点复现"，其实只是路径写错了。
@@ -267,17 +305,23 @@ jobs:
           step_mark "④d V3：只加 -DBATCHSMITH_BUILD_GUI=OFF（少编一个 GUI 目标）"
           variant_exe V3 "-DBATCHSMITH_BUILD_GUI=OFF" || true
 
+          step_mark "④e 同一条出错路径的 CLI 侧（bs.exe 带崩溃自报，能给出错指令与调用链）"
+          cli_probe V2 || true
+
           echo "===== 诊断矩阵汇总（跑完次数 / 5）====="
           echo "  V0 --preset ci 原样            : ${done_V0:-未跑}"
           echo "  V1 + MESSAGE_TRACE=ON          : ${done_V1:-未跑}"
           echo "  V2 + CRASH_REPORT=ON           : ${done_V2:-未跑}"
           echo "  V3 + BUILD_GUI=OFF             : ${done_V3:-未跑}"
+          echo "  V2 的 CLI 侧（bs eval）退出码   : ${cli_V2:-未跑}"
           # 注解是 job 日志匿名读不到时唯一的通道
-          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}"
+          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}、V2-CLI 退出码 ${cli_V2:-?}"
           echo "  读法：V1 若 =5 而 V0/V2/V3 都 <5 ⇒ **就是那几行探针代码把红点遮住了**（编译期效应），"
           echo "        那么后续仪器必须搬出 core（放进测试可执行文件或独立进程），否则永远看不到它；"
           echo "        V2/V3 若也 =5 ⇒ 阴性对照失效，这台机器上每次构建的堆布局本来就在掷骰子，"
           echo "        结论要改成「红点是随机的」再重做这一轮。"
+          echo "        V2-CLI：非 0 且打出「崩溃自报」⇒ 同一次崩溃在 CLI 上也能复现，"
+          echo "        下轮就照它的「模块 + RVA + 调用链」把 BatchResult::error 的析构钉到函数上。"
 
       # CHM 帮助手册（Windows 原生帮助格式：双击即看、带左侧目录树）
       #
