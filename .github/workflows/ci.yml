@@ -208,7 +208,7 @@ jobs:
 
           # 一个变体跑 5 次：既看"红/绿"，也看"红得稳不稳"
           probe_variant() {  # $1=变体名 $2=exe
-            local name="$1" exe="$2" ok=0 i=1 code last
+            local name="$1" exe="$2" ok=0 exitbad=0 i=1 code last sum=no
             while [ "$i" -le 5 ]; do
               # ⚠️ `|| code=$?` 不能省：被测用例崩掉时返回的是 bash **无法映射到信号**的
               # NTSTATUS —— 0xc0000374 一律报 127，而本步的 shell 是 `bash -e`
@@ -219,16 +219,30 @@ jobs:
               code=0
               timeout 300 "$exe" -s -nv > "$outdir/$name-$i.log" 2>&1 || code=$?
               last=$(grep -a '^TEST CASE:' "$outdir/$name-$i.log" | tail -1 | sed 's/^TEST CASE:[[:space:]]*//' || true)
-              if grep -qa 'test cases:' "$outdir/$name-$i.log"; then
+              # ⚠️ `done_*` 沿用 run #42 的判据（**汇总行是否打出**）—— 为的是能跟历史对比；
+              # 但那个判据有个已知盲区：doctest 的汇总行打在所有用例跑完之后、`main` 返回之前，
+              # 而"退出时的静态析构"在它之后，所以**退出时才崩**的会被算成"跑完"。
+              # 所以额外数一个 `exitbad_*`：汇总行打出来了、但退出码非 0。
+              #   done 高 + exitbad 高 ⇒ 这个变体不是"遮住了红点"，只是把崩点挪到了退出时
+              #   （run #37 就见过这种：多持一份引用之后崩点挪到 `exit()` 的静态析构）。
+              sum=no
+              grep -qa 'test cases:' "$outdir/$name-$i.log" && sum=yes
+              if [ "$sum" = yes ]; then
                 ok=$((ok + 1))
-                echo "矩阵 · $name#$i 退出码=$code 跑完=是 最后用例=${last:-无}"
+                if [ "$code" -eq 0 ]; then
+                  echo "矩阵 · $name#$i 退出码=$code 跑完=是（干净） 最后用例=${last:-无}"
+                else
+                  exitbad=$((exitbad + 1))
+                  echo "矩阵 · $name#$i 退出码=$code 跑完=是但**退出时崩** 最后用例=${last:-无}"
+                fi
               else
-                echo "矩阵 · $name#$i 退出码=$code 跑完=**否（崩了）** 崩溃前最后用例=${last:-无}"
+                echo "矩阵 · $name#$i 退出码=$code 跑完=**否（执行中崩了）** 崩溃前最后用例=${last:-无}"
               fi
               i=$((i + 1))
             done
             eval "done_${name}=$ok"
-            echo "矩阵 · $name 汇总：5 次里跑完 $ok 次"
+            eval "exitbad_${name}=$exitbad"
+            echo "矩阵 · $name 汇总：5 次里打出汇总行 $ok 次（其中退出时崩 $exitbad 次）"
           }
 
           # 自证（这一道是本项目反复换来的）：变体 exe 必须真的存在且非空，
@@ -266,7 +280,7 @@ jobs:
           # 用 V2 的构建目录（只多一个 CRASH_REPORT=ON，**core 与红点同码**），
           # 所以这条 CLI 结论可以回推到测试二进制那次崩溃上。
           cli_probe() {  # $1=变体名（要有 CRASH_REPORT，且已配置过）
-            local name="$1" bcode=0 ccode=0
+            local name="$1" bcode=0 ccode=0 idx=1 tpl
             # 同样要接住退出码（同上：`bash -e` 撞上未映射的 NTSTATUS 会打断整步）
             cmake --build "build/$name" --target bs --parallel > "$outdir/$name-bs-build.log" 2>&1 || bcode=$?
             if [ "$bcode" -ne 0 ]; then
@@ -279,11 +293,34 @@ jobs:
               echo "矩阵 · $name CLI：没产出 $bs ⇒ CLI 侧无结论"
               return 0
             fi
-            # 与 ctest 里崩掉的那个用例同一条模板（test_engine.cpp:180 `$x = 1$`）
-            "$bs" eval '$x = 1$' --list list1=a,b > "$outdir/$name-cli.log" 2>&1 || ccode=$?
-            eval "cli_${name}=$ccode"
-            echo "矩阵 · $name CLI：bs eval 退出码=$ccode（0=没崩；非 0 且打出「崩溃自报」即命中）"
-            sed -n '1,24p' "$outdir/$name-cli.log" | while IFS= read -r l; do echo "  cli| $l"; done
+            # ⚠️ 两个模板都要走，而且**红点是第二个**（这一条是 run #44 才纠正过来的）：
+            #   ① `$x = 1$`：区段里是赋值 ⇒ Lua **编译**错，走 `describe_error`。
+            #      run #41 我先验的是它，它**不崩** —— 当时我据此写下"这条出错路径是干净的"，
+            #      并顺手把前几轮盯 `m_violation_message` 的结论标成"瞄错块了"。**那句话是错的**：
+            #      真正的原因是它压根不是红点（见下），跟"路径干不干净"无关。
+            #   ② `$(function() while true do end end)()$`：死循环 ⇒ 沙箱按**指令数中止**，
+            #      走 `result.error = QStringLiteral("已中止：%1").arg(box.violation_message())`。
+            #      run #44 的 ④g 已证明**红点就是它**：`--first=57 --last=57` 单独跑也崩，
+            #      #57 名字 = 「沙箱中止会透出为求值失败」（test_engine.cpp:184）。
+            #      ⇒ 前几轮盯 `Sandbox::m_violation_message` 的方向是**对的**，我中途那次纠偏才错。
+            #   ③ 再来一遍 ②：CLI 这边只跑一次就下结论，"只崩一次"和"必崩"分不开。
+            #
+            # 退出码读法（`bs` 自己的约定，见 cli/main.cpp:46-48）：
+            #   0 = 求值成功（这里不该出现）、1 = 干净的求值失败（**中止透出成功**，CLI 不崩）、
+            #   2 = 用法错（**我们命令写错了**，不是红点）、127 = 崩了（NTSTATUS 未映射成信号）。
+            local tpls=('$x = 1$'
+                        '$(function() while true do end end)()$'
+                        '$(function() while true do end end)()$')
+            for tpl in "${tpls[@]}"; do
+              ccode=0
+              "$bs" eval "$tpl" --list list1=1,2,3 --list list2=a,b,c \
+                > "$outdir/$name-cli-$idx.log" 2>&1 || ccode=$?
+              eval "cli_${name}_${idx}=$ccode"
+              echo "矩阵 · $name CLI #$idx 退出码=$ccode（1=干净的中止；127=崩了；2=我们命令写错）"
+              echo "  cli| 模板：$tpl"
+              sed -n '1,24p' "$outdir/$name-cli-$idx.log" | while IFS= read -r l; do echo "  cli| $l"; done
+              idx=$((idx + 1))
+            done
             return 0
           }
 
@@ -310,38 +347,56 @@ jobs:
 
           # ④f 前缀扫描：红点要不要靠**前面**的用例"垫"出来？
           #
-          # run #42 已经给出三条互相咬合的事实：
+          # run #42 给出三条互相咬合的事实：
           #   ① 红点稳定复现：V0 / V2 / V3 各 **0/5**（每次都崩在同一个用例上）；
-          #   ② **`MESSAGE_TRACE`（唯一改 core 代码的那个开关）是唯一遮罩**：V1 = **5/5** 全干净；
-          #   ③ 同一条出错路径从 **CLI** 走**不崩**（退出码 1，错误信息一字不差：
+          #   ② **`MESSAGE_TRACE`（唯一改 core 代码的那个开关）是唯一遮罩**：V1 = **5/5**；
+          #   ③ 从 CLI 走 `$x = 1$` 那条出错路径**不崩**（退出码 1，错误信息一字不差：
           #      `区段 `$x = 1$` 出错：')' expected near '='`）。
-          # ⇒ `describe_error` / `BatchResult::error` 本身没问题；崩的是**已经被踩坏的堆**
-          #   在 free 那一块时被 NT 堆发现。而"往 core 里加仪器"必然改布局 ⇒ **自己把红点遮住**
-          #   （这正是 run #41 预判的分支）。所以这一步**一行代码都不碰**，只用已经构建好的
+          #
+          # ⚠️ 下面这段是 run #41/#42 当时写的，**run #44 已证明它错在哪儿**，原文留作记录：
+          #      「⇒ describe_error / BatchResult::error 本身没问题；崩的是已经被踩坏的堆」
+          #    错在把 ③ 当成了"红点路径在 CLI 上不崩"。其实 ③ 那条是 `describe_error` 路径，
+          #    而**红点是另一条**：沙箱按指令数中止 ⇒ `QStringLiteral("已中止：%1").arg(...)`。
+          #    所以 ③ 根本没测到红点，它既不支持"路径干净"，也不能用来排除 `m_violation_message`。
+          #    根因是 doctest 的 `TEST CASE:` 行打在**用例进入时**（不是结束时），
+          #    我把"崩前最后打出的那一行"当成了"崩掉的那条"，于是错位了一条。
+          #
+          # 但这一步的**做法**不变、仍然成立：**一行代码都不碰**，只用已经构建好的
           #   `--preset ci` binary 做**前缀扫描**：`--first=1 --last=N`，N 从 1 递增，
-          #   **第一个崩掉的 N** 就是"引入那次踩坏的那条用例"的上界（不崩则说明与顺序无关）。
+          #   **第一个不干净的 N** 就是"引入那次踩坏的那条用例"的上界（全干净则说明与顺序无关）。
           #
           # 为什么这是当前最划算的一步：**不需要任何新构建**（不受②的遮罩影响），
           # 每次跑 ~0.6 秒，60 次不到一分钟；而它能直接决定下一步该看哪条用例。
           prefix_scan() {  # $1=exe $2=最大 N
-            local exe="$1" maxn="$2" n=1 code=0 bad=""
+            local exe="$1" maxn="$2" n=1 code=0 bad="" kind=""
             while [ "$n" -le "$maxn" ]; do
               code=0
               # 与 V0 完全同一种调用方式（`-s -nv`），只多限制用例区间，结论才可比
               timeout 60 "$exe" --first=1 --last="$n" -s -nv > "$outdir/prefix-$n.log" 2>&1 || code=$?
-              if ! grep -qa 'test cases:' "$outdir/prefix-$n.log"; then
-                bad="$n"
-                echo "矩阵 · ④f 最小崩掉的前缀：--first=1 --last=$n（退出码 $code）"
-                echo "矩阵 · ④f 该前缀里崩前最后一条用例："
-                grep -a '^TEST CASE:' "$outdir/prefix-$n.log" | tail -1 \
-                  | while IFS= read -r l; do echo "  prefix| $l"; done
-                break
+              # ⚠️ 判据要两条一起看，只看"有没有打 test cases:"会漏掉一类：
+              #   doctest 的汇总行是在**所有用例跑完之后、`main` 返回之前**打的，
+              #   而"退出时跑的静态析构"在它**之后** —— 那种崩溃照样打出了汇总行。
+              #   run #37 恰好就撞见过这种（崩点挪到 `exit()` 里的静态析构、没有 main 帧），
+              #   所以这里补上退出码：两条都满足才算"干净"。
+              if grep -qa 'test cases:' "$outdir/prefix-$n.log"; then
+                if [ "$code" -eq 0 ]; then
+                  n=$((n + 1))
+                  continue
+                fi
+                kind="退出时（汇总行已打出，崩在 exit 的静态析构）"
+              else
+                kind="执行中"
               fi
-              n=$((n + 1))
+              bad="$n"
+              echo "矩阵 · ④f 最小「不干净」的前缀：--first=1 --last=$n 退出码=$code 崩在$kind"
+              echo "矩阵 · ④f 该前缀里崩前最后一条用例："
+              grep -a '^TEST CASE:' "$outdir/prefix-$n.log" | tail -1 \
+                | while IFS= read -r l; do echo "  prefix| $l"; done
+              break
             done
             eval "prefix_first_bad=$bad"
             if [ -z "$bad" ]; then
-              echo "矩阵 · ④f --first=1 --last=$maxn 全都没崩 ⇒ 红点与「前缀长度」无关（要看那条用例自己）"
+              echo "矩阵 · ④f --first=1 --last=$maxn 全都干净（汇总行 + 退出码 0）⇒ 红点与「前缀长度」无关"
             fi
           }
           step_mark "④f 前缀扫描：红点要不要靠前面的用例「垫」出来（不碰代码）"
@@ -353,14 +408,18 @@ jobs:
 
           # ④g：把 `--last` 钉在崩溃点上，只往上收 `--first` —— 量"需要多长的前置"。
           #
-          # run #43 的 ④f 给出：`--first=1 --last=56` **干净**、`--last=57` **崩**，
-          # 崩前最后一条用例名是「区段只允许表达式：赋值语句编译不过」。
-          # 但"这一段前置有多长是必需的"还没量出来：
-          #   * `--first=57 --last=57`（只跑这一条）也崩 ⇒ 这条用例**自身**足够，与顺序无关，
-          #     下轮就直接盯它做什么（尤其它与 CLI 那次不崩的差别：`sample_sources()`）；
+          # run #43 的 ④f 给出：`--first=1 --last=56` 干净、`--last=57` 崩，
+          # 崩前最后一条用例名是「区段只允许表达式：赋值语句编译不过」（= #56）。
+          # ⚠️ 这个名字**不是**元凶 —— run #44 的 ④g 把编号和名字钉死之后才看清：
+          #   ④g 逐条单跑 #55 / #56 / #57，**只有 #57 崩**，而 #57 的名字是
+          #   「沙箱中止会透出为求值失败」（`test_engine.cpp:184`，模板是
+          #   `$(function() while true do end end)()$`）。#56 是 `$x = 1$`、完好的。
+          #   即 `TEST CASE:` 行是**进入用例时**打的 ⇒ "最后打出的那一行"是"正要进入的那条"，
+          #   而它前面那条（#56）只是凑巧还活着。差一位就是差一条用例，这正是要钉编号的原因。
+          #
+          # 这一步要回答的：`--first=57 --last=57` 单独跑会不会崩？
+          #   * 会 ⇒ #57 **自身**足够，与顺序无关（run #44 实测：会），下轮直接盯它；
           #   * 只有 K 很小才崩 ⇒ 是**累积**效应，得再二分是哪几条在上面垫出来的。
-          # 顺便把 #55/#56/#57 的**名字**逐条打出来：诊断构建里那份编号对照可能与这里差一位，
-          # 而差一位会让"元凶"指错人。
           #
           # 与 ④f 同一个道理：**一行代码都不碰**，只用红点那份已经构建好的 binary。
           trigger_scan() {  # $1=exe $2=崩溃的前缀上界（--last 固定用它）
@@ -371,23 +430,31 @@ jobs:
               code=0
               timeout 60 "$exe" --first="$k" --last="$k" -s -nv > "$outdir/one-$k.log" 2>&1 || code=$?
               nm=$(grep -a '^TEST CASE:' "$outdir/one-$k.log" | head -1 | sed 's/^TEST CASE:[[:space:]]*//' || true)
-              if grep -qa 'test cases:' "$outdir/one-$k.log"; then
+              # 判据与 ④f 一致：汇总行 + 退出码 0 两条都要（只有前者会漏掉"退出时才崩"）
+              if grep -qa 'test cases:' "$outdir/one-$k.log" && [ "$code" -eq 0 ]; then
                 echo "矩阵 · ④g #$k = 「${nm:-?}」 退出码=$code 跑完=是"
+              elif grep -qa 'test cases:' "$outdir/one-$k.log"; then
+                echo "矩阵 · ④g #$k = 「${nm:-?}」 退出码=$code 跑完=是但**退出时崩**"
               else
-                echo "矩阵 · ④g #$k = 「${nm:-?}」 退出码=$code 跑完=**否（崩了）**"
+                echo "矩阵 · ④g #$k = 「${nm:-?}」 退出码=$code 跑完=**否（执行中崩了）**"
               fi
             done
 
             step_mark "④g 固定 --last=$last，只往上收 --first：找「最小仍需的前置」"
             local smallest_bad=""
             for k in "$last" $((last - 1)) $((last - 2)) $((last - 5)) $((last - 10)) $((last - 20)) 10 2 1; do
-              [ "$k" -ge 1 ] || continue
+              # ⚠️ 除了 k>=1，还要挡 k>last：doctest 拿到 `--first=10 --last=5` 会**报错退出**，
+              # 而"非 0 退出 + 没有汇总行"长得跟"崩了"一模一样 ⇒ 会凭空造出一个假触发点。
+              [ "$k" -ge 1 ] && [ "$k" -le "$last" ] || continue
               code=0
               timeout 90 "$exe" --first="$k" --last="$last" -s -nv > "$outdir/range-$k.log" 2>&1 || code=$?
-              if grep -qa 'test cases:' "$outdir/range-$k.log"; then
-                echo "矩阵 · ④g [$k..$last] 退出码=$code 跑完=**是（不崩）**"
+              if grep -qa 'test cases:' "$outdir/range-$k.log" && [ "$code" -eq 0 ]; then
+                echo "矩阵 · ④g [$k..$last] 退出码=$code 跑完=**是（干净）**"
+              elif grep -qa 'test cases:' "$outdir/range-$k.log"; then
+                echo "矩阵 · ④g [$k..$last] 退出码=$code 跑完=是但**退出时崩**"
+                smallest_bad="$k"
               else
-                echo "矩阵 · ④g [$k..$last] 退出码=$code 跑完=**否（崩了）**"
+                echo "矩阵 · ④g [$k..$last] 退出码=$code 跑完=**否（执行中崩了）**"
                 smallest_bad="$k"
               fi
             done
@@ -404,24 +471,30 @@ jobs:
             trigger_scan "$base_exe" "$prefix_first_bad"
           fi
 
-          echo "===== 诊断矩阵汇总（跑完次数 / 5）====="
-          echo "  V0 --preset ci 原样            : ${done_V0:-未跑}"
-          echo "  V1 + MESSAGE_TRACE=ON          : ${done_V1:-未跑}"
-          echo "  V2 + CRASH_REPORT=ON           : ${done_V2:-未跑}"
-          echo "  V3 + BUILD_GUI=OFF             : ${done_V3:-未跑}"
-          echo "  V2 的 CLI 侧（bs eval）退出码   : ${cli_V2:-未跑}"
-          echo "  ④f 最小崩掉的前缀 --last=N      : ${prefix_first_bad:-没崩（60 以内）}"
+          echo "===== 诊断矩阵汇总（打出汇总行的次数 / 5；括号里是其中「退出时崩」的次数）====="
+          echo "  V0 --preset ci 原样            : ${done_V0:-未跑}（退出时崩 ${exitbad_V0:-?}）"
+          echo "  V1 + MESSAGE_TRACE=ON          : ${done_V1:-未跑}（退出时崩 ${exitbad_V1:-?}）"
+          echo "  V2 + CRASH_REPORT=ON           : ${done_V2:-未跑}（退出时崩 ${exitbad_V2:-?}）"
+          echo "  V3 + BUILD_GUI=OFF             : ${done_V3:-未跑}（退出时崩 ${exitbad_V3:-?}）"
+          echo "  V2 的 CLI 侧（bs eval）退出码   : #1(语法错)=${cli_V2_1:-未跑} #2(沙箱中止)=${cli_V2_2:-未跑} #3(同 #2 复跑)=${cli_V2_3:-未跑}"
+          echo "  ④f 最小「不干净」前缀 --last=N  : ${prefix_first_bad:-无（60 以内全干净）}"
           echo "  ④g 最小的仍会崩的起点 --first=K : ${g_smallest_bad:-未定}"
           # 注解是 job 日志匿名读不到时唯一的通道
-          echo "::notice::诊断矩阵（跑完次数/5）：V0 原样 ${done_V0:-?}、V1 MESSAGE_TRACE ${done_V1:-?}、V2 CRASH_REPORT ${done_V2:-?}、V3 GUI=OFF ${done_V3:-?}、V2-CLI 退出码 ${cli_V2:-?}、④f 最小崩前缀 ${prefix_first_bad:-无}、④g 最小崩起点 ${g_smallest_bad:-无}"
+          echo "::notice::诊断矩阵（跑完次数/5，括号=其中退出时崩）：V0 ${done_V0:-?}(${exitbad_V0:-?})、V1 MESSAGE_TRACE ${done_V1:-?}(${exitbad_V1:-?})、V2 CRASH_REPORT ${done_V2:-?}(${exitbad_V2:-?})、V3 GUI=OFF ${done_V3:-?}(${exitbad_V3:-?})、V2-CLI 退出码 [#1 ${cli_V2_1:-?} / #2 ${cli_V2_2:-?} / #3 ${cli_V2_3:-?}]（1=干净中止、127=崩）、④f 最小不干净前缀 ${prefix_first_bad:-无}、④g 最小崩起点 ${g_smallest_bad:-无}"
           echo "  读法：V1 若 =5 而 V0/V2/V3 都 <5 ⇒ **就是那几行探针代码把红点遮住了**（编译期效应），"
           echo "        那么后续仪器必须搬出 core（放进测试可执行文件或独立进程），否则永远看不到它；"
           echo "        V2/V3 若也 =5 ⇒ 阴性对照失效，这台机器上每次构建的堆布局本来就在掷骰子，"
           echo "        结论要改成「红点是随机的」再重做这一轮。"
-          echo "        V2-CLI：非 0 且打出「崩溃自报」⇒ 同一次崩溃在 CLI 上也能复现，"
-          echo "        下轮就照它的「模块 + RVA + 调用链」把 BatchResult::error 的析构钉到函数上；"
-          echo "        退出码 1 且只打一行错误 ⇒ 这条路径本身是干净的，崩的是被别处踩坏的堆。"
-          echo "        ④f：有 N ⇒ 触发点就在第 N 条用例（或它前一条的收尾）上，不需要更长的前缀。"
+          echo "        V2-CLI（这是**独立进程**，所以不受「往 core 加仪器就遮住」那条限制）："
+          echo "        #2/#3 若 =127 且打出「崩溃自报」⇒ 同一次崩溃在 CLI 上也能复现，"
+          echo "          下轮就照它的「模块 + RVA + 调用链」把那次 QString 的析构钉到函数上；"
+          echo "        #2/#3 若 =1 且只打一行「已中止：…」⇒ 中止那条路径在 CLI 的堆布局下是好的，"
+          echo "          ⇒ 红点不是「中止路径本身写错」，而是测试二进制那边**布局差异**把它暴露出来"
+          echo "            （下轮改用运行时手段：CLI + PageHeap，或把 #57 单独编成一个 exe）；"
+          echo "        #2 与 #3 不一致 ⇒ 它本身就是不稳定的（那也是一种结论，要先记下来）。"
+          echo "        #1 若 =2 ⇒ 我们的命令行写错了，整条 CLI 结论作废（不是红点）。"
+          echo "        ④f：判据 = 「打出汇总行」**且**「退出码 0」——只看前者会把「退出时才崩」算成跑完。"
+          echo "            有 N ⇒ 触发点就在第 N 条用例上，不需要更长的前缀；无 N ⇒ 与前缀长度无关。"
           echo "        ④g：K = ④f 的 N ⇒ 那条用例**自身**足够，与顺序无关，下轮直接盯它；"
           echo "            K 远小于 N ⇒ 是**累积**效应，下轮在 [K..N] 里二分找是哪几条垫出来的。"
 
@@ -561,7 +634,7 @@ jobs:
         run: |
           exe=./build/ci-debug/bin/batchsmith_tests.exe
 
-          echo "=== 1) 整跑一遍：报告"第一个让堆不一致的用例" ==="
+          echo "=== 1) 整跑一遍：报告「第一个让堆不一致的用例」 ==="
           set +e
           "$exe" -s -nv > /tmp/all.log 2>&1
           code=$?
