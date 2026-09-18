@@ -906,17 +906,24 @@ jobs:
               > "$bundle/cli-crash-selftest.txt" 2>&1
             code_selftest=$?
             set -e
-            head -40 "$bundle/cli-crash-selftest.txt" | tr -d '\r' || true
-            # 自检要验两件事，缺一不可：① 仪器接住了异常（退出码 42 + 自报那行）；
-            # ② **调用链真的走起来了**。第二件是 run #28 之后补上的 —— 当时的自检只验了 ①，
-            # 而同一轮的真崩恰恰落在"只报主模块 RVA"这个盲区里（出错指令在别的模块）。
+            head -60 "$bundle/cli-crash-selftest.txt" | tr -d '\r' || true
+            # 自检要验三件事，缺一不可：① 仪器接住了异常（退出码 42 + 自报那行）；
+            # ② **调用链真的走起来了**（run #28 之后补的 —— 当时的自检只验了 ①，
+            # 而同一轮的真崩恰恰落在"只报主模块 RVA"这个盲区里，出错指令在别的模块）；
+            # ③ **寄存器与被访问页的性质真的打出来了**（run #31 之后补的 —— 那一轮把崩点
+            # 钉到了「QString 拷贝构造里对源对象的 d 做引用计数自增」，但"那个 d 指向的
+            # 到底是已释放的堆还是从来没映射过的地址"只能靠寄存器 + VirtualQuery 分开，
+            # 而当时这两样都不在报告里，只能靠猜）。缺了 ③，报告看起来照样"完整"。
             frames_selftest=$(grep -ac '^    #' "$bundle/cli-crash-selftest.txt" || true)
+            regs_selftest=$(grep -ac '寄存器' "$bundle/cli-crash-selftest.txt" || true)
             if [ "$code_selftest" -ne 42 ] || ! grep -qa '崩溃自报' "$bundle/cli-crash-selftest.txt"; then
               echo "::error::崩溃自报仪器**没生效**（退出码 $code_selftest，应为 42）⇒ ④c 的结论不可信；本站作业的问题"
             elif [ "${frames_selftest:-0}" -lt 3 ]; then
               echo "::error::崩溃自报仪器只走出 ${frames_selftest:-0} 帧调用链（应 ≥ 3）⇒ 步行没工作，④c 的调用链不可信；本站作业的问题"
+            elif [ "${regs_selftest:-0}" -lt 1 ] || ! grep -qa '指向 : ' "$bundle/cli-crash-selftest.txt"; then
+              echo "::error::崩溃自报仪器没打出寄存器或嫌疑对象（连自检都没有这一块）⇒ ④c 的证据不完整，定不了「垃圾指针到底是什么」；本站作业的问题"
             else
-              echo "仪器自检通过：VEH 已装上、模块名与 RVA 已算出、调用链 $frames_selftest 帧、退出码 42"
+              echo "仪器自检通过：VEH 已装上、模块名与 RVA 已算出、调用链 $frames_selftest 帧、寄存器与嫌疑对象已打出、退出码 42"
             fi
 
             set +e
@@ -1060,14 +1067,22 @@ jobs:
             echo "   但**没有** --first/--last 时两者相等，所以它 < 总数就说明循环中途结束了。"
             echo
             echo "== 出错指令与调用链（④c：CLI 的 VEH 自报 —— **本轮的正主**）=="
-            echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）、调用链 ${frames_selftest:-?} 帧（应 ≥ 3）"
-            head -40 "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
+            echo "仪器自检: 退出码 ${code_selftest:-未跑}（应为 42）、调用链 ${frames_selftest:-?} 帧（应 ≥ 3）、寄存器行 ${regs_selftest:-?} 条（应 ≥ 1）"
+            head -60 "$bundle/cli-crash-selftest.txt" 2>/dev/null | tr -d '\r' || true
             echo "CLI 中止路径（PageHeap）退出码: ${code_cli:-未跑}；产出见 run-cli-abort.txt"
-            head -40 "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
+            head -60 "$bundle/run-cli-abort.txt" 2>/dev/null | tr -d '\r' || true
             echo "→ 出错位置写成了「模块名 + 0xRVA」，run #28 实测它**不一定是 bs.exe**。"
             echo "  属于 bs.exe 的帧配证据包里的 bs.map 翻函数名："
             echo "  .workbuddy/tools/ciwatch/symbolicate.py bs.map <RVA>"
-            echo "  别的模块只有模块名与 RVA，但调用链里属于 bs.exe 的那几帧足以指到出错代码。"
+            echo "  外部模块的 RVA（如 Qt6Core.dll）用**导出表**翻 —— 证据包里已带上那个 DLL："
+            echo "  .workbuddy/tools/ciwatch/pe_rva.py Qt6Core.dll <RVA>"
+            echo "  反汇编里 `call *0x...(%rip)` 命中的是哪个导入函数，用（objdump -p 的那列不是 IAT 槽，别对着行号数）："
+            echo "  .workbuddy/tools/ciwatch/iat.py bs.exe <槽地址>"
+            echo "→ 「被访问页 / 寄存器 / rcx、rdx 指向」这几样是 run #31 之后新加的：崩在外部模块里时，"
+            echo "  光有调用链只能知道「是谁调进去的」，这三样才说明「它拿到的对象是什么鬼」；"
+            echo "  `空闲` = 那片内存已归还系统（use-after-free 的铁证），"
+            echo "  `已提交/私有` = 内存确实存在、只是不属于这个对象（说明对象本身被覆盖或从未初始化）。"
+            echo "  验证工具（本机可跑）：.workbuddy/tools/ciwatch/{iat,pe_rva,symbolicate}.py 各自的 --selftest。"
             echo
             echo "== WER（存档；⚠️ runner 上它一直是空的，别再把结论寄托在这）=="
             echo "两个 XML 的字节数: $(wc -c < "$bundle/wer-application-error.xml" 2>/dev/null || echo '?') / $(wc -c < "$bundle/wer-wer.xml" 2>/dev/null || echo '?')"

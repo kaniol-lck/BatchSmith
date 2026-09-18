@@ -232,6 +232,126 @@ bool readable(std::uintptr_t address) {
     return (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) == 0;
 }
 
+/// 把一个地址所在**内存区域**的性质写出来：状态 / 类型 / 保护 / 区域大小。
+///
+/// 为什么非要这一段（2026-09-18）：run #28/#30/#31 三轮的出错指令都是
+/// `lock xadd %eax,(%r8)`（**QString 拷贝构造的引用计数自增**），而 `%r8` 是源对象
+/// 的 `d` 指针，三轮都落在"页内偏移恒为 0xfc0"的地址上。**那个地址到底是
+/// "已经 free 掉、页被解提交的堆块"、"线程栈"、还是"从来没映射过的野指针"** ——
+/// 这三种推断对应三条完全不同的排查路线，而只报一个裸地址是分不出来的。
+/// `VirtualQuery` 一句话就能分开：`空闲` = 已归还给系统（use-after-free 的铁证）；
+/// `已提交/私有` = 那片内存真的存在，只是不属于这个对象。
+void describe_region(std::uintptr_t address, char* out, std::size_t out_size) {
+    MEMORY_BASIC_INFORMATION mbi;
+    std::memset(&mbi, 0, sizeof(mbi));
+    if (::VirtualQuery(reinterpret_cast<LPCVOID>(address), &mbi, sizeof(mbi)) == 0) {
+        std::snprintf(out, out_size, "不可查询（未映射到用户空间）");
+        return;
+    }
+    const char* state = "?";
+    switch (mbi.State) {
+        case MEM_COMMIT:
+            state = "已提交";
+            break;
+        case MEM_RESERVE:
+            state = "已保留";
+            break;
+        case MEM_FREE:
+            state = "空闲";
+            break;
+        default:
+            break;
+    }
+    const char* type = "";
+    switch (mbi.Type) {
+        case MEM_IMAGE:
+            type = "/映像";
+            break;
+        case MEM_MAPPED:
+            type = "/映射";
+            break;
+        case MEM_PRIVATE:
+            type = "/私有";
+            break;
+        default:
+            break;
+    }
+    const char* protect = "";
+    if (mbi.State == MEM_COMMIT) {
+        if ((mbi.Protect & PAGE_GUARD) != 0) {
+            protect = "/守卫页";
+        } else if ((mbi.Protect & PAGE_NOACCESS) != 0) {
+            protect = "/不可访问";
+        } else if ((mbi.Protect & PAGE_EXECUTE_READWRITE) == PAGE_EXECUTE_READWRITE) {
+            protect = "/可执行读写";
+        } else if ((mbi.Protect & PAGE_EXECUTE_READ) == PAGE_EXECUTE_READ) {
+            protect = "/可执行只读";
+        } else if ((mbi.Protect & PAGE_READWRITE) == PAGE_READWRITE) {
+            protect = "/读写";
+        } else if ((mbi.Protect & PAGE_READONLY) == PAGE_READONLY) {
+            protect = "/只读";
+        } else if ((mbi.Protect & PAGE_WRITECOPY) != 0) {
+            protect = "/写时复制";
+        } else {
+            protect = "/其它保护";
+        }
+    }
+    std::snprintf(out,
+                  out_size,
+                  "%s%s%s 区域 %lluK",
+                  state,
+                  type,
+                  protect,
+                  static_cast<unsigned long long>(mbi.RegionSize / 1024));
+}
+
+/// 报"出错指令**用的那个指针**"指向了什么。
+///
+/// 这一段的动机很具体：崩溃点在别人的 DLL 里（Qt 的 `QString` 拷贝构造），
+/// **光有调用链只能知道"是谁调进去的"，不知道"它拿到的对象是什么鬼"**。
+/// 而 MSVC 调外部 DLL 一律先把对象地址装进寄存器（本例是 `%rdx` = 源对象、
+/// `%rcx` = 目标对象）⇒ 把 `%rdx` 指向的头 24 字节按"Qt 容器三件套
+/// （数据头指针 / 数据指针 / 长度）"打出来，一眼就能看出：
+/// 是整块都是垃圾（对象本身没了），还是只有第一个指针是垃圾（只有 `d` 被写坏）；
+/// 再对第一个 qword 单独查一次区域性质，"它指向已释放的页"就当场成立。
+///
+/// ⚠️ 读之前必须先用 VirtualQuery 确认可读：野指针本来就可能落在未映射页上，
+/// 在 VEH 里去读它 = 再崩一次，现场就没了。
+void dump_pointer_object(const char* label, std::uintptr_t object_address) {
+    char line[320];
+    char region[80];
+    describe_region(object_address, region, sizeof(region));
+    std::snprintf(line,
+                  sizeof(line),
+                  "  %s 指向 : %#llx（%s）\n",
+                  label,
+                  static_cast<unsigned long long>(object_address),
+                  region);
+    emit_line(line);
+
+    // 需要读 3 个 qword（24 字节），首尾都要可读。
+    if (!readable(object_address) || !readable(object_address + 16)) {
+        emit_line("    （该对象不可读，内容打不出来）\n");
+        return;
+    }
+    const auto* words = reinterpret_cast<const std::uint64_t*>(object_address);
+    char first_region[80];
+    describe_region(static_cast<std::uintptr_t>(words[0]), first_region, sizeof(first_region));
+    std::snprintf(line,
+                  sizeof(line),
+                  "    第 1 个 qword（Qt 容器里通常是**数据头指针**）= %#llx  →  %s\n",
+                  static_cast<unsigned long long>(words[0]),
+                  first_region);
+    emit_line(line);
+    std::snprintf(line,
+                  sizeof(line),
+                  "    第 2 个 qword（数据指针）= %#llx\n"
+                  "    第 3 个 qword（长度）    = %lld\n",
+                  static_cast<unsigned long long>(words[1]),
+                  static_cast<long long>(words[2]));
+    emit_line(line);
+}
+
 /// 用 PE 的 unwind 信息把调用链走一遍，从**出错函数自己**（#0）开始。
 ///
 /// 为什么不用 `RtlCaptureStackBackTrace`：它是从**当前** RSP 往上数的，而我们此刻
@@ -288,6 +408,14 @@ void walk_stack(const CONTEXT* fault_context) {
     emit_line("    （到帧数上限了）\n");
 }
 
+/// 访问违例里"被访问的那个地址"；不是访问违例就返回 0。
+std::uintptr_t access_address(const EXCEPTION_RECORD* record) {
+    if (record->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || record->NumberParameters < 2) {
+        return 0;
+    }
+    return static_cast<std::uintptr_t>(record->ExceptionInformation[1]);
+}
+
 LONG WINAPI crash_reporter(EXCEPTION_POINTERS* info) {
     const EXCEPTION_RECORD* record = info != nullptr ? info->ExceptionRecord : nullptr;
     if (record == nullptr || !is_fault(record->ExceptionCode)) {
@@ -326,10 +454,43 @@ LONG WINAPI crash_reporter(EXCEPTION_POINTERS* info) {
 
     std::snprintf(line,
                   sizeof(line),
-                  "  主模块   : %s 基址 %#llx\n"
-                  "  调用链（#0 = 出错函数自己，按 PE unwind 信息步行，最多 %d 帧）：\n",
+                  "  主模块   : %s 基址 %#llx\n",
                   module_name_of(main_base),
-                  static_cast<unsigned long long>(main_base),
+                  static_cast<unsigned long long>(main_base));
+    emit_line(line);
+
+    if (info->ContextRecord != nullptr) {
+        const CONTEXT* ctx = info->ContextRecord;
+        // 被访问的那一页是什么性质 —— 区分"已释放的堆"与"从来没映射过"就靠这一句。
+        // ⚠️ 访问地址是 0（空指针写）时也要把寄存器打出来，别把整块一起跳过：
+        // 自检走的正是空指针那条路，跳掉就等于"新加的证据从来没被自检证明过"。
+        const std::uintptr_t accessed = access_address(record);
+        if (accessed != 0) {
+            char region[80];
+            describe_region(accessed, region, sizeof(region));
+            std::snprintf(line, sizeof(line), "  被访问页 : %s\n", region);
+            emit_line(line);
+        }
+        std::snprintf(line,
+                      sizeof(line),
+                      "  寄存器   : rip=%#llx rsp=%#llx rbp=%#llx rcx=%#llx rdx=%#llx r8=%#llx "
+                      "r9=%#llx\n",
+                      static_cast<unsigned long long>(ctx->Rip),
+                      static_cast<unsigned long long>(ctx->Rsp),
+                      static_cast<unsigned long long>(ctx->Rbp),
+                      static_cast<unsigned long long>(ctx->Rcx),
+                      static_cast<unsigned long long>(ctx->Rdx),
+                      static_cast<unsigned long long>(ctx->R8),
+                      static_cast<unsigned long long>(ctx->R9));
+        emit_line(line);
+        // rcx / rdx 是 x64 的头两个整型参数位。MSVC 调外部 DLL 时，对象地址就在这里。
+        dump_pointer_object("rcx", static_cast<std::uintptr_t>(ctx->Rcx));
+        dump_pointer_object("rdx", static_cast<std::uintptr_t>(ctx->Rdx));
+    }
+
+    std::snprintf(line,
+                  sizeof(line),
+                  "  调用链（#0 = 出错函数自己，按 PE unwind 信息步行，最多 %d 帧）：\n",
                   kMaxFrames);
     emit_line(line);
 
