@@ -225,8 +225,27 @@ void watch_block(const QChar* data) {
 ///   * 若页照样翻成「已保留」⇒ 释放**绕过引用计数**（谁直接 `free` 了它，或者堆元数据
 ///     已经被写坏、堆自己把这块丢了）。后者与 CI 单元测试长期报的 `0xc0000374`
 ///     （堆损坏）是同一个故事 —— 那正是这条线索最值得确认的地方。
+/// `BATCHSMITH_HOLD` 的**运行期**关断开关（run #49 新增）。
+///
+/// 为什么非要能在运行期关：这份"多持一份引用"**本身就是遮罩** —— 它把引用计数抬高一份，
+/// 正好抵消"多减了一次"，于是红点消失。但"HOLD 是遮罩"这句话要成立，必须排除掉
+/// **编译期效应**（多出来的那几行代码改了布局/inline 决策，也可能让红点消失）：
+///   * 换一个构建去比 ⇒ **两份二进制**，run #38/#39 就是栽在这里（"1 比 2 分不清
+///     运行时效应与编译期效应"，见 `.workbuddy/memory/topics/ci-heap-corruption.md`）；
+///   * 于是同一个开关要在**同一份二进制**里关掉 ⇒ 两组读数才可以直接对起来。
+///
+/// 用法（只在诊断构建 + `BATCHSMITH_MESSAGE_TRACE=1` 下有效）：
+///   `BATCHSMITH_MESSAGE_NO_HOLD=1` ⇒ 探针照打（ref 读数照样有），但**不持有**那个块。
+bool message_no_hold() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("BATCHSMITH_MESSAGE_NO_HOLD");
+        return value != nullptr && value[0] == '1';
+    }();
+    return enabled;
+}
+
 void hold_message_reference(const QString& value) {
-    if (!message_trace_on() || value.isNull()) {
+    if (message_no_hold() || !message_trace_on() || value.isNull()) {
         return;
     }
     static QString held;  // 进程生命周期内只留第一份，避免每行都加一份
@@ -577,11 +596,31 @@ void limit_hook(lua_State* state, lua_Debug* /*debug*/) {
     account.instructions += sandbox->limits().instruction_slice;
 
     if (account.instructions > sandbox->limits().max_instructions) {
-#ifdef BATCHSMITH_ABORT_MSG_LOCAL
+#if defined(BATCHSMITH_ABORT_MSG_LOCAL_CLEAR)
+        // 诊断 A/B 的第三档（`BATCHSMITH_ABORT_MSG_LOCAL_CLEAR=1`，run #49 新增）。
+        //
+        // 与下面 V4 那一档一字不差，只多一句 `clear()` —— 于是它**故意**把那"少减的一次"
+        // 补回来：`QString::clear()` 在 Qt 6.7 的实现就是
+        //     void QString::clear() { if (!isNull()) *this = QString(); }   // qstring.h:1184
+        // 对块**恰好减一次**引用。所以走过这一句之后，引用计数与
+        // 「内联临时在完整表达式结束时正常析构一次」**完全相同**（只剩 `m_violation_message`
+        // 一份），而 `luaL_error` 的 `longjmp` 照样会跳过析构（那一份不会再减第二次）。
+        //
+        // ⇒ 这就把 V4 那一档的"多欠一次减"补平了，也就把两种微观解释分开了（判据先写死）：
+        //     * V5 仍 5/5 ⇒ 同一份状态、V0 却崩 ⇒ **V0 那条临时被析构了两次**（真凶）；
+        //     * V5 变回 0/5 ⇒ V4 的绿是**靠漏一份引用遮出来的**，真凶不在那条临时上。
+        //   完整的四行判据表写在 `.github/workflows/ci.yml` 的读取指引里。
+        QString abort_message =
+                QStringLiteral("指令数超过上限（%1）").arg(sandbox->limits().max_instructions);
+        sandbox->raise(Violation::Instructions, abort_message);
+        abort_message.clear();  // 显式放掉这一份（= 内联临时那一次正常析构）
+#elif defined(BATCHSMITH_ABORT_MSG_LOCAL)
         // 诊断 A/B 的另一半（开了 BATCHSMITH_ABORT_MSG_LOCAL）：
         // 把消息放进**具名局部**。它的寿命到块结束，而下面的 `luaL_error` 是 `longjmp`
         // ⇒ 它**根本不会被析构**（少一次引用计数减），与下面那个"临时对象在完整表达式
         // 结束时正常析构"的写法收支不同。两种写法的对照见 src/core/CMakeLists.txt 里那段说明。
+        // ⚠️ 这一档**一个字符都没动**（run #48 的原样），为的是让 run #49 里的 V4 仍然是
+        //    同一份可比对照 —— 预处理之后剩下来的正文与 run #48 逐字节相同。
         const QString abort_message =
                 QStringLiteral("指令数超过上限（%1）").arg(sandbox->limits().max_instructions);
         sandbox->raise(Violation::Instructions, abort_message);
@@ -594,12 +633,15 @@ void limit_hook(lua_State* state, lua_Debug* /*debug*/) {
         // 所以这一行正好把两种可能切成两半：
         //   * 到这里就「已保留」⇒ 释放发生在"消息那一份引用被减掉"的时候；
         //   * 到这里还好、只有后面才坏 ⇒ 凶手在 Lua 错误传播那条路上。
-        // ⚠️ 两条分支下的消息**引用数收支不同**，读这份探针时要先确认构建开的是哪一半：
+        // ⚠️ **三档**分支下的消息**引用数收支各不相同**，读这份探针时要先确认构建开的是哪一档：
         //   * 默认（内联临时）：临时绑定到 `const QString&` 参数，寿命到**整条完整表达式**
         //     结束 ⇒ 走过这一行时它**已经析构**，块只剩 `m_violation_message` 一份引用；
         //   * `BATCHSMITH_ABORT_MSG_LOCAL=1`（具名局部）：寿命到**块结束**，而本函数最后
         //     一句是 `luaL_error`（`longjmp`）⇒ 它**永远不会析构**，块此时还剩两份引用。
-        //     所以那一半是"多欠了一次减"，不是等价替换 —— 对照结论必须连着这一点读。
+        //     所以那一档是"多欠了一次减"，不是等价替换 —— 对照结论必须连着这一点读；
+        //   * `…_LOCAL_CLEAR=1`（具名局部 + 显式 `clear()`）：`clear()` 已经把那一次减掉，
+        //     而 `longjmp` 又跳过析构 ⇒ 走过这一行时**只剩成员一份**，与默认档**同状态**。
+        //     ⇒ 这一档的存在意义就是"把 V4 多欠的那一次补平"，见上面那段判据。
         sandbox->trace_violation_message("limit_hook：raise 返回之后");
         // 诊断：挂写看门狗（见 sandbox.cpp 里那段说明）。**必须挂在这里、不能挂进 `raise()`**：
         // `raise(...)` 那条语句收尾时参数临时对象会析构，那也是一次合法的引用计数写，

@@ -67,6 +67,14 @@ if(BATCHSMITH_MESSAGE_TRACE)
     target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_MESSAGE_TRACE=1)
 endif()
 
+# ⚠️ 运行时开关（run #49）：`BATCHSMITH_HOLD` 那份"多持一份引用"**本身就是遮罩**
+#   （它把引用计数抬高一份，正好抵消"多减一次"）。要证明这句话，必须能在**同一份二进制**里
+#   把它关掉再看一遍 —— 换构建去比就分不清"运行时效应"与"编译期效应"（run #38/#39 的教训）。
+#   所以 `sandbox.cpp` 里的 `hold_message_reference()` 额外认一个环境变量：
+#       BATCHSMITH_MESSAGE_NO_HOLD=1  ⇒  探针照打，但不持有那个块
+#   它**不需要**编译期开关（只在 MESSAGE_TRACE 构建里有这段代码），所以这里没有对应的
+#   CMake 选项 —— 记在这里是为了让"这些环境变量在哪读的"有据可查。
+
 # 诊断 A/B 开关（run #48）：把「指令数中止」那条消息从**内联临时对象**改成**具名局部**。
 #
 # 为什么值得单独做一个开关：run #47 的 ④h（全页堆 + CLI）已经确定崩溃是
@@ -88,4 +96,24 @@ endif()
 # 「in-core 仪器本身就是遮罩」那一类 —— 可以放心做对照。
 if(BATCHSMITH_ABORT_MSG_LOCAL)
     target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_ABORT_MSG_LOCAL=1)
+endif()
+
+# 诊断 A/B 的下一档（run #49）：V4 + 显式 `clear()` 一次。
+#
+# 为什么需要它：V4 之所以"绿"，有两种**完全不同**的微观解释，而它们对"下一步该改哪里"
+# 指向相反的方向：
+#   ① 那条内联临时**被析构了两次**（真的多减一次）⇒ 元凶就是它；
+#   ② 具名局部只是**少减一次**（`longjmp` 跳过析构）⇒ V4 是"把引用计数抬高一份"遮出来的，
+#      元凶在别处。
+# 单看 V4 分不开：两种解释都预测"V4 绿"。所以再加一档 —— **把少减的那一次补回来**
+# （`QString::clear()` = `*this = QString()`，对块恰好减一次），让引用计数回到
+# 与"内联临时正常析构一次"**完全相同**的状态，再看它还崩不崩：
+#   * V5 仍 5/5 ⇒ 同一状态、V0 却崩 ⇒ 解释 ①；
+#   * V5 变回 0/5 ⇒ 解释 ②。
+#
+# ⚠️ 判据**先写死**（在 ci.yml 与 CHANGELOG 里各存一份），跑完再解释就会自己骗自己。
+# ⚠️ 与 `…_LOCAL` 一样：它**不持有也不观察**那个块（只多一次合法的析构等价物），
+#   不属于「in-core 仪器本身就是遮罩」那一类。
+if(BATCHSMITH_ABORT_MSG_LOCAL_CLEAR)
+    target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_ABORT_MSG_LOCAL_CLEAR=1)
 endif()

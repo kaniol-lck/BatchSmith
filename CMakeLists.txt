@@ -60,7 +60,23 @@ option(BATCHSMITH_STRICT      "把本项目代码的编译器警告当作错误"
 option(BATCHSMITH_LTO         "对 Release 构建启用 LTO（体积与性能优化）" ON)
 option(BATCHSMITH_ALLOC_AUDIT "审计沙箱的 Lua 分配器（诊断 CI 专用，默认关闭）" OFF)
 option(BATCHSMITH_CRASH_REPORT "让 CLI 在崩溃时自报出错指令地址（诊断 CI 专用，默认关闭）" OFF)
+# ⚠️ run #49 补的 `option()`：这个开关以前只靠 `-D` + 末尾的 `if()` 生效，能跑，
+#   但没有显式声明 ⇒ 名字拼错时 CMake 只发一条 `Manually-specified variables were not
+#   used` 的 warning，配置构建照样成功，那一档就**静默退化成一份普通构建**
+#   （症状是 A/B 两组读数一模一样，看起来像"没有遮罩"—— 会直接把结论带偏）。
+option(BATCHSMITH_MESSAGE_TRACE "给消息数据块打页面/引用计数探针（诊断 CI 专用，默认关闭）" OFF)
 option(BATCHSMITH_ABORT_MSG_LOCAL "把中止消息的临时对象改成具名局部（诊断 A/B 专用，默认关闭）" OFF)
+option(BATCHSMITH_ABORT_MSG_LOCAL_CLEAR "具名局部再显式 clear() 一次，补平 V4 多欠的那次减（诊断 A/B 专用，默认关闭）" OFF)
+
+# ⚠️ 交叉守卫（run #49）：`…_LOCAL_CLEAR` 的代码写在 `…_LOCAL` 那一档的旁边，
+#   单开它**能编过**（预处理器照 branch 走），但含义会变得莫名其妙，而且读的人容易
+#   以为自己在跑 V4。CMake 对没有对应 `option()` 的 `-D` 只发一条 warning、配置照样成功
+#   ⇒ 这类"静默退化"必须在这里断言掉，别留给读数去发现。
+if(BATCHSMITH_ABORT_MSG_LOCAL_CLEAR AND NOT BATCHSMITH_ABORT_MSG_LOCAL)
+    message(FATAL_ERROR
+        "BATCHSMITH_ABORT_MSG_LOCAL_CLEAR=ON 必须同时开 BATCHSMITH_ABORT_MSG_LOCAL=ON"
+        "（V5 = V4 + 显式 clear()，是同一个 A/B 的下一档）。")
+endif()
 
 # ===========================================================================
 # 编译警告策略
@@ -184,6 +200,9 @@ if(BATCHSMITH_MESSAGE_TRACE)
 endif()
 if(BATCHSMITH_ABORT_MSG_LOCAL)
     message(STATUS "  中止消息具名化  : ON（诊断构建：中止消息由临时对象改成具名局部，做 A/B 用）")
+endif()
+if(BATCHSMITH_ABORT_MSG_LOCAL_CLEAR)
+    message(STATUS "  中止消息具名化+CLEAR: ON（诊断构建：V5 —— 具名局部再显式 clear() 一次）")
 endif()
 message(STATUS "=======================================================================")
 message(STATUS "")

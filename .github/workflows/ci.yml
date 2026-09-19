@@ -217,8 +217,8 @@ jobs:
           # 注意：陷阱体用**单引号**包，展开推迟到退出那一刻（这样它读到的是当时的变量值）。
           # 里面每个变量都写成 `${x:-未跑}` —— 本步带 `set -u`，不这么写陷阱自己会再炸一次。
           trap 'if [ "${MATRIX_DONE:-0}" != "1" ]; then
-                  echo "::error::诊断矩阵 · 本步**中途死了**：④d/④e/④f/④g/④h/汇总里有没跑到的，下面这些是死之前的结论（未跑=没跑到）"
-                  echo "::error::诊断矩阵 · 退出时已知：V0=${done_V0:-未跑} V1=${done_V1:-未跑} V2=${done_V2:-未跑} V3=${done_V3:-未跑} V4=${done_V4:-未跑} V2CLI=[${cli_V2_1:-未跑}/${cli_V2_2:-未跑}/${cli_V2_3:-未跑}] V4CLI=[${cli_V4_1:-未跑}/${cli_V4_2:-未跑}/${cli_V4_3:-未跑}] ④h=[${ph_V2_1:-未跑}/${ph_V2_2:-未跑}] ④hV4=[${ph_V4_1:-未跑}/${ph_V4_2:-未跑}] ④f=${prefix_first_bad:-未跑} ④g=${g_smallest_bad:-未跑}"
+                  echo "::error::诊断矩阵 · 本步**中途死了**：④d/④e/④f/④g/④h/④i/汇总里有没跑到的，下面这些是死之前的结论（未跑=没跑到）"
+                  echo "::error::诊断矩阵 · 退出时已知：V0=${done_V0:-未跑} V1=${done_V1:-未跑} V2=${done_V2:-未跑} V3=${done_V3:-未跑} V4=${done_V4:-未跑} V5=${done_V5:-未跑} V2CLI=[${cli_V2_1:-未跑}/${cli_V2_2:-未跑}/${cli_V2_3:-未跑}] V4CLI=[${cli_V4_1:-未跑}/${cli_V4_2:-未跑}/${cli_V4_3:-未跑}] V5CLI=[${cli_V5_1:-未跑}/${cli_V5_2:-未跑}/${cli_V5_3:-未跑}] ④h=[${ph_V2_1:-未跑}/${ph_V2_2:-未跑}] ④hV4=[${ph_V4_1:-未跑}/${ph_V4_2:-未跑}] ④hV5=[${ph_V5_1:-未跑}/${ph_V5_2:-未跑}] ④iV6=[HOLD开 ${hold_V6_A:-未跑} / HOLD关 ${hold_V6_B:-未跑}] ④f=${prefix_first_bad:-未跑} ④g=${g_smallest_bad:-未跑}"
                 fi' EXIT
 
           # 一个变体跑 5 次：既看"红/绿"，也看"红得稳不稳"
@@ -380,12 +380,37 @@ jobs:
           step_mark "④d V4：中止消息的临时对象改成具名局部（唯一改 core 形状的变体）"
           variant_exe V4 "-DBATCHSMITH_ABORT_MSG_LOCAL=ON" || true
 
+          # ④d V5（run #49 新增）：把 V4 多欠的那一次减**补平**，用来分开两种微观解释。
+          #
+          # 单看 V4 分不出下面这两件事 —— 两种解释都预测「V4 绿」：
+          #   ① 那条内联临时**被析构了两次**（真的多减一次）⇒ 元凶就是它；
+          #   ② 具名局部只是**少减一次**（`luaL_error` 的 `longjmp` 跳过析构），V4 是靠
+          #      「把引用计数抬高一份」把它遮出来的，元凶在别的地方。
+          # V5 就在 V4 那一档上多写一句 `abort_message.clear()`：
+          #   `QString::clear()` 在 Qt 6.7 是 `if (!isNull()) *this = QString();`（qstring.h:1184），
+          #   对块**恰好减一次**引用。于是走过这一句之后，引用计数与「内联临时在完整表达式
+          #   结束时正常析构一次」**完全相同**（只剩 `m_violation_message` 一份），而
+          #   `longjmp` 照样会跳过析构 ⇒ V4 那份「多欠的一次」被补平了。
+          # ⭐ 判据**先写死**（跑完再编解释就是自欺）：
+          #   * V5 仍 5/5 ⇒ 同一份状态、V0 却崩 ⇒ 解释 ①（那条临时真被析构了两次）；
+          #   * V5 变回 0/5 ⇒ 解释 ②（V4 的绿是靠漏一份引用遮出来的，真凶不在临时上）。
+          # ⚠️ V4 那一档在 run #49 里**原样重跑**当对照 ⇒ 两组读数仍是同一台 runner、
+          #   同一个提交、同一个工具链；而且 V4 的正文这次**一个字符都没动**
+          #   （只多了新的 `#if` 分支，预处理之后与 run #48 逐字节相同）。
+          step_mark "④d V5：具名局部 + 显式 clear()（把 V4 多欠的那次减补平）"
+          variant_exe V5 "-DBATCHSMITH_ABORT_MSG_LOCAL=ON -DBATCHSMITH_ABORT_MSG_LOCAL_CLEAR=ON" || true
+
           step_mark "④e 同一条出错路径的 CLI 侧（bs.exe 带崩溃自报，能给出错指令与调用链）"
           cli_probe V2 || true
           # V4 也走一遍 CLI（最直接的读数：换了写法之后，CLI 还崩不崩）。
           # ⚠️ `cli_probe` 会顺带把 build/V4 的 bs 目标也构建出来，④h 那边要用。
           step_mark "④e V4：同一条 CLI 路径，但中止消息是具名局部"
           cli_probe V4 || true
+          # V5 也走一遍 CLI：判据表里的「V5 仍 5/5 / 变回 0/5」要连**同一个二进制**的 CLI
+          # 读数一起看（CLI 侧：退出码 1 = 干净中止、42 = VEH 自报后自退）。
+          # ⚠️ 同 V4：`cli_probe` 会顺带把 build/V5 的 bs 目标构建出来，④h V5 要用它。
+          step_mark "④e V5：同一条 CLI 路径，具名局部 + clear()"
+          cli_probe V5 || true
 
           # ④h：把红点放到**全页堆**下，再从 CLI 走一遍。
           #
@@ -584,6 +609,77 @@ jobs:
           # 这两种在"测试二进制 0/5 变 5/5"这一个读数上**长得一样**，必须靠异常码分开。
           step_mark "④h V4：全页堆下同一模板，中止消息是具名局部"
           pageheap_cli V4 || true
+          # V5 同理：判据表里「V5 变回 0/5」要同时看它在全页堆下会不会当场 AV ——
+          # 若只在普通堆下崩、全页堆下反而不崩，说明只是"崩点挪了位置"，不是"消掉了"。
+          step_mark "④h V5：全页堆下同一模板，具名局部 + clear()"
+          pageheap_cli V5 || true
+
+          # ------------------------------------------------------------------
+          # ④i：HOLD 那一份引用**本身就是遮罩** —— 在**同一份二进制**里把它关掉，读 ref 曲线。
+          # ------------------------------------------------------------------
+          #
+          # 为什么「同一份二进制」是硬要求：`BATCHSMITH_HOLD` 只在运行时 `BATCHSMITH_MESSAGE_TRACE=1`
+          #   下才真的多持一份引用，而**这一份多出来的引用正好能抵消"多减一次"**。要证明
+          #   「HOLD 是遮罩」，就不能拿两个构建去比 —— 换构建连代码布局一起换了，而
+          #   run #38/#39 已经吃过这个亏（"1 比 2 分不清运行时效应与编译期效应"）。
+          # 于是 `sandbox.cpp` 的 `hold_message_reference()` 认了一个运行期开关：
+          #     BATCHSMITH_MESSAGE_NO_HOLD=1 ⇒ 探针照打（ref 曲线照样有），但不持有那个块。
+          #
+          # 本机（MinGW）预演已验证这个开关**真的改读数**（同一份 bs.exe，只差环境变量）：
+          #     A 组（HOLD 开）ref 曲线 1 → 2 → 2 → 2 → 2 → 2
+          #     B 组（HOLD 关）ref 曲线 1 → 2 → 1 → 1 → 1 → 1
+          # 本机没有红点，所以 B 组那条**收支平衡**的曲线就是"账目正确时应该长什么样"的对照。
+          # ⭐ 要读的是：MSVC 上 B 组（HOLD 关、不再遮）在哪一步开始变成「ref=0」或
+          #   「读不动/已保留」—— 那就是那一减发生的**位置与次数**，比任何行为判据都直接。
+          # ⚠️ 探针是**纯读**（不改引用计数），所以它不会像 HOLD 那样自己制造遮罩；但它跑在
+          #   `MESSAGE_TRACE` 构建上，**这一档的"崩不崩"不能跟 V0 比**（TU 形状不同），
+          #   只跟它自己的 A 组比 —— 这正是"同一份二进制"的意义。
+          hold_ab() {  # $1=变体名（要有 MESSAGE_TRACE + CRASH_REPORT，且已 configure）
+            local name="$1" bcode=0 pcode=0 g=""
+            cmake --build "build/$name" --target bs --parallel > "$outdir/$name-bs-build.log" 2>&1 \
+              || bcode=$?
+            if [ "$bcode" -ne 0 ]; then
+              echo "矩阵 · ④i $name：bs 目标没构建成功（退出码 $bcode）⇒ 这一档无结论"
+              tail -5 "$outdir/$name-bs-build.log" | while IFS= read -r l; do echo "::warning::$l"; done
+              return 0
+            fi
+            local bs="build/$name/bin/bs.exe"
+            if [ ! -s "$bs" ]; then
+              echo "矩阵 · ④i $name：没产出 $bs ⇒ 这一档无结论"
+              return 0
+            fi
+            local tpl='$(function() while true do end end)()$'
+            # A = HOLD 开（历史默认）；B = HOLD 关（把遮罩摘掉）。两组都开探针。
+            for g in A B; do
+              pcode=0
+              if [ "$g" = B ]; then
+                BATCHSMITH_MESSAGE_TRACE=1 BATCHSMITH_MESSAGE_NO_HOLD=1 \
+                  timeout 300 "$bs" eval "$tpl" --list list1=1,2,3 --list list2=a,b,c \
+                  > "$outdir/$name-hold-$g.log" 2>&1 || pcode=$?
+              else
+                BATCHSMITH_MESSAGE_TRACE=1 \
+                  timeout 300 "$bs" eval "$tpl" --list list1=1,2,3 --list list2=a,b,c \
+                  > "$outdir/$name-hold-$g.log" 2>&1 || pcode=$?
+              fi
+              # ⚠️ 变量名里不能带 `-`（bash 会把 `hold_X-Y_A=1` 读成命令，只打一条
+              #   `command not found`，**读数静默丢失**）⇒ 变体名先净化成合法标识符。
+              #   本机预演时就是用目录名 windows-mingw-trace 撞上的，CI 里叫 V6 才没事。
+              local key="${name//-/_}"
+              eval "hold_${key}_${g}=$pcode"
+              local nprobe=0 nbad=0
+              nprobe=$(grep -ca '探针' "$outdir/$name-hold-$g.log" || true)
+              nbad=$(grep -Eca '读不动|已保留' "$outdir/$name-hold-$g.log" || true)
+              echo "矩阵 · ④i $name-$g 退出码=$pcode（A=HOLD 开 / B=HOLD 关）探针行=$nprobe 其中坏页=$nbad"
+              # ⭐ ref 曲线就是这一档的正菜：探针行原样打出来（"读不动"也算读数）
+              grep -a '探针' "$outdir/$name-hold-$g.log" | while IFS= read -r l; do echo "  hold| $l"; done
+              echo "  hold| 错误信息：$(grep -a '已中止' "$outdir/$name-hold-$g.log" | head -1)"
+              echo "  hold| 分配器看门狗命中：$(grep -Eca 'Lua 分配器动了被盯的块' "$outdir/$name-hold-$g.log" || true)"
+            done
+            return 0
+          }
+          step_mark "④i V6：同一份二进制、只差 BATCHSMITH_MESSAGE_NO_HOLD（HOLD 是不是遮罩）"
+          variant_exe V6 "-DBATCHSMITH_MESSAGE_TRACE=ON -DBATCHSMITH_CRASH_REPORT=ON" || true
+          hold_ab V6 || true
 
           echo "===== 诊断矩阵汇总（打出汇总行的次数 / 5；括号里是其中「退出时崩」的次数）====="
           echo "  V0 --preset ci 原样            : ${done_V0:-未跑}（退出时崩 ${exitbad_V0:-?}）"
@@ -591,14 +687,19 @@ jobs:
           echo "  V2 + CRASH_REPORT=ON           : ${done_V2:-未跑}（退出时崩 ${exitbad_V2:-?}）"
           echo "  V3 + BUILD_GUI=OFF             : ${done_V3:-未跑}（退出时崩 ${exitbad_V3:-?}）"
           echo "  V4 中止消息用具名局部（改 core）: ${done_V4:-未跑}（退出时崩 ${exitbad_V4:-?}）"
+          echo "  V5 具名局部 + clear()（改 core） : ${done_V5:-未跑}（退出时崩 ${exitbad_V5:-?}）"
+          echo "  V6 + MESSAGE_TRACE+CRASH_REPORT  : ${done_V6:-未跑}（退出时崩 ${exitbad_V6:-?}）"
           echo "  V2 的 CLI 侧（bs eval）退出码   : #1(语法错)=${cli_V2_1:-未跑} #2(沙箱中止)=${cli_V2_2:-未跑} #3(同 #2 复跑)=${cli_V2_3:-未跑}"
           echo "  V4 的 CLI 侧（具名局部）退出码  : #1=${cli_V4_1:-未跑} #2=${cli_V4_2:-未跑} #3=${cli_V4_3:-未跑}"
+          echo "  V5 的 CLI 侧（具名局部+clear）  : #1=${cli_V5_1:-未跑} #2=${cli_V5_2:-未跑} #3=${cli_V5_3:-未跑}"
           echo "  ④h 同一条模板（全页堆）退出码   : V2 #1=${ph_V2_1:-未跑} #2=${ph_V2_2:-未跑}"
           echo "  ④h V4（具名局部，全页堆）退出码 : #1=${ph_V4_1:-未跑} #2=${ph_V4_2:-未跑}"
+          echo "  ④h V5（具名局部+clear，全页堆） : #1=${ph_V5_1:-未跑} #2=${ph_V5_2:-未跑}"
+          echo "  ④i V6（同一二进制，HOLD 开/关） : A(HOLD开)=${hold_V6_A:-未跑} B(HOLD关)=${hold_V6_B:-未跑}（1=干净、42=VEH 自报）"
           echo "  ④f 最小「不干净」前缀 --last=N  : ${prefix_first_bad:-无（60 以内全干净）}"
           echo "  ④g 最小的仍会崩的起点 --first=K : ${g_smallest_bad:-未定}"
           # 注解是 job 日志匿名读不到时唯一的通道
-          echo "::notice::诊断矩阵（跑完次数/5，括号=其中退出时崩）：V0 ${done_V0:-?}(${exitbad_V0:-?})、V1 MESSAGE_TRACE ${done_V1:-?}(${exitbad_V1:-?})、V2 CRASH_REPORT ${done_V2:-?}(${exitbad_V2:-?})、V3 GUI=OFF ${done_V3:-?}(${exitbad_V3:-?})、V4 中止消息具名局部 ${done_V4:-?}(${exitbad_V4:-?})、V2-CLI 退出码 [#1 ${cli_V2_1:-?} / #2 ${cli_V2_2:-?} / #3 ${cli_V2_3:-?}]、V4-CLI [#1 ${cli_V4_1:-?} / #2 ${cli_V4_2:-?} / #3 ${cli_V4_3:-?}]（1=干净中止、42=VEH 自报、127=崩）、④h PageHeap V2 [#1 ${ph_V2_1:-?} / #2 ${ph_V2_2:-?}]、④h PageHeap V4 [#1 ${ph_V4_1:-?} / #2 ${ph_V4_2:-?}]、④f 最小不干净前缀 ${prefix_first_bad:-无}、④g 最小崩起点 ${g_smallest_bad:-无}"
+          echo "::notice::诊断矩阵（跑完次数/5，括号=其中退出时崩）：V0 ${done_V0:-?}(${exitbad_V0:-?})、V1 MESSAGE_TRACE ${done_V1:-?}(${exitbad_V1:-?})、V2 CRASH_REPORT ${done_V2:-?}(${exitbad_V2:-?})、V3 GUI=OFF ${done_V3:-?}(${exitbad_V3:-?})、V4 中止消息具名局部 ${done_V4:-?}(${exitbad_V4:-?})、V5 具名局部+CLEAR ${done_V5:-?}(${exitbad_V5:-?})、V6 MESSAGE_TRACE+CRASH_REPORT ${done_V6:-?}(${exitbad_V6:-?})、V2-CLI 退出码 [#1 ${cli_V2_1:-?} / #2 ${cli_V2_2:-?} / #3 ${cli_V2_3:-?}]、V4-CLI [#1 ${cli_V4_1:-?} / #2 ${cli_V4_2:-?} / #3 ${cli_V4_3:-?}]、V5-CLI [#1 ${cli_V5_1:-?} / #2 ${cli_V5_2:-?} / #3 ${cli_V5_3:-?}]（1=干净中止、42=VEH 自报、127=崩）、④h PageHeap V2 [#1 ${ph_V2_1:-?} / #2 ${ph_V2_2:-?}]、④h PageHeap V4 [#1 ${ph_V4_1:-?} / #2 ${ph_V4_2:-?}]、④h PageHeap V5 [#1 ${ph_V5_1:-?} / #2 ${ph_V5_2:-?}]、④i V6 同一二进制 HOLD开 ${hold_V6_A:-?} / HOLD关 ${hold_V6_B:-?}、④f 最小不干净前缀 ${prefix_first_bad:-无}、④g 最小崩起点 ${g_smallest_bad:-无}"
           echo "  读法：V1 若 =5 而 V0/V2/V3 都 <5 ⇒ **就是那几行探针代码把红点遮住了**（编译期效应），"
           echo "        那么后续仪器必须搬出 core（放进测试可执行文件或独立进程），否则永远看不到它；"
           echo "        V2/V3 若也 =5 ⇒ 阴性对照失效，这台机器上每次构建的堆布局本来就在掷骰子，"
@@ -638,6 +739,33 @@ jobs:
           echo "           * ⚠️ 但 V4 绿**不等于修好** —— 它是「少减一次」，属于把问题**遮住**。"
           echo "             所以还要看 ④h V4：异常码还是 0xc0000005 ⇒ 只是挪走了，没消掉。"
           echo "           三者合起来才能定性：**V4 绿 + ④h V4 不崩 = 遮住；V4 绿 + ④h V4 仍崩 = 挪走。**"
+          echo "        ⭐⭐⭐ V5（run #49 新增）的读法 —— 它是**专门用来分开两种微观解释**的那一档。"
+          echo "           ⚠️ 单看 V4 分不开下面两件事（两者都预测「V4 绿」）："
+          echo "             ① 那条内联临时**被析构了两次**（真的多减一次）⇒ 元凶就是它；"
+          echo "             ② 具名局部只是**少减一次**（longjmp 跳过析构）⇒ V4 是靠把引用计数"
+          echo "                抬高一份遮出来的，元凶在别处。"
+          echo "           V5 = V4 + 一句 abort_message.clear()。clear() 在 Qt 6.7 就是"
+          echo "           if (!isNull()) *this = QString();（qstring.h:1184），对块恰好减一次；"
+          echo "           而 longjmp 照样跳过析构。⇒ 走过这一句之后，引用计数与「内联临时在完整"
+          echo "           表达式结束时正常析构一次」**完全同状态**（只剩 m_violation_message 一份）。"
+          echo "           * V5 仍 5/5 ⇒ 同一份状态、V0 却崩 ⇒ 解释 ①：那条临时**被析构了两次**；"
+          echo "           * V5 变回 0/5 ⇒ 解释 ②：V4 的绿是靠漏一份引用遮出来的，真凶不在临时上，"
+          echo "             下一轮要把搜索范围从「limit_hook 的临时」挪走。"
+          echo "           ⚠️ 无论哪一边，V5 都**不是修法**（它要么揭示真凶、要么排除一条线索）。"
+          echo "        ⭐⭐ ④i V6 的读法（run #49 新增，**同一份二进制**的 A/B，不受编译期效应干扰）："
+          echo "           两组都跑 build/V6 的同一个 bs.exe、都开探针，只差一个环境变量："
+          echo "             A 组 BATCHSMITH_MESSAGE_TRACE=1（HOLD 开，= 历史默认）"
+          echo "             B 组 再叠加 BATCHSMITH_MESSAGE_NO_HOLD=1（HOLD 关，把遮罩摘掉）"
+          echo "           * 两组退出码不同（A 干净、B = 42/127）⇒ **HOLD 就是遮罩**，而且这次是"
+          echo "             在同一份二进制上证出来的（不是「换了布局」那种解释）；"
+          echo "           * 两组一样 ⇒ HOLD 没在遮东西 ⇒ V1 的 5/5 只能算编译期效应。"
+          echo "           ⭐ ref 曲线才是这一档的正菜：本机 MinGW 预演（本机没有红点）里 B 组是"
+          echo "             1 → 2 → 1 → 1 → 1 → 1（收支平衡 —— 这就是账目正确时的对照曲线）；"
+          echo "             A 组是 1 → 2 → 2 → 2 → 2 → 2（HOLD 那一份把 2 撑住）。"
+          echo "             在 MSVC 上就找**B 组从哪一步开始变成 0 / 读不动** —— 那就是那一减的"
+          echo "             位置与次数，比任何行为判据都直接。"
+          echo "           ⚠️ 探针是纯读（不改引用计数），不自造遮罩；但它跑在 MESSAGE_TRACE 构建上，"
+          echo "             所以只有它的 A/B 之间可比，不能拿它跟 V0 的崩不崩直接比。"
           echo "        ④f：判据 = 「打出汇总行」**且**「退出码 0」——只看前者会把「退出时才崩」算成跑完。"
           echo "            有 N ⇒ 触发点就在第 N 条用例上，不需要更长的前缀；无 N ⇒ 与前缀长度无关。"
           echo "        ④g：K = ④f 的 N ⇒ 那条用例**自身**足够，与顺序无关，下轮直接盯它；"
