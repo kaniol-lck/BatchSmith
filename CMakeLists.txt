@@ -60,6 +60,7 @@ option(BATCHSMITH_STRICT      "把本项目代码的编译器警告当作错误"
 option(BATCHSMITH_LTO         "对 Release 构建启用 LTO（体积与性能优化）" ON)
 option(BATCHSMITH_ALLOC_AUDIT "审计沙箱的 Lua 分配器（诊断 CI 专用，默认关闭）" OFF)
 option(BATCHSMITH_CRASH_REPORT "让 CLI 在崩溃时自报出错指令地址（诊断 CI 专用，默认关闭）" OFF)
+option(BATCHSMITH_ABORT_MSG_LOCAL "把中止消息的临时对象改成具名局部（诊断 A/B 专用，默认关闭）" OFF)
 
 # ===========================================================================
 # 编译警告策略
@@ -180,6 +181,9 @@ if(BATCHSMITH_CRASH_REPORT)
 endif()
 if(BATCHSMITH_MESSAGE_TRACE)
     message(STATUS "  消息追踪        : ON（诊断构建：在注入/中止/拷贝三处打印消息数据块的页面性质）")
+endif()
+if(BATCHSMITH_ABORT_MSG_LOCAL)
+    message(STATUS "  中止消息具名化  : ON（诊断构建：中止消息由临时对象改成具名局部，做 A/B 用）")
 endif()
 message(STATUS "=======================================================================")
 message(STATUS "")

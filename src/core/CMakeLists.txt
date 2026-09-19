@@ -66,3 +66,26 @@ endif()
 if(BATCHSMITH_MESSAGE_TRACE)
     target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_MESSAGE_TRACE=1)
 endif()
+
+# 诊断 A/B 开关（run #48）：把「指令数中止」那条消息从**内联临时对象**改成**具名局部**。
+#
+# 为什么值得单独做一个开关：run #47 的 ④h（全页堆 + CLI）已经确定崩溃是
+# **use-after-free** —— `engine.cpp:169` 那次**合法**拷贝对 `m_violation_message` 的
+# 数据块做引用计数自增，而那个块**早就被释放了**（`0xc0000005` 写在
+# `Qt6Core.dll+0x10860` 的 `lock xadd` 上）。缺的那一环是"谁多减了一次"，
+# 而它只能发生在「`raise()` 返回 → `lua_pcall` 返回」这段窗口里。
+#
+# 这段窗口里唯一和消息块有关的 C++ 对象，就是 `limit_hook` 里那个**内联临时**：
+#     sandbox->raise(Violation::Instructions,
+#                    QStringLiteral("指令数超过上限（%1）").arg(limit));
+# 临时对象绑定到 `const QString&` 参数，寿命到**整条完整表达式结束**为止；
+# 而具名局部的寿命到**块结束**，而 `luaL_error` 是 `longjmp` —— 具名局部根本来不及析构。
+# ⇒ 两种写法的引用计数收支**不一样**，正好可以当单变量 A/B：
+#    * 这个开关一开就"好了" ⇒ 问题就出在那个临时对象的生命周期上；
+#    * 开了照样在同一条指令上 `0xc0000005` ⇒ 与临时无关，凶手在 Lua 错误传播那条路上。
+#
+# ⚠️ 它**不持有也不观察**那个数据块（只是换个存储位置），所以不属于 run #47 查明的
+# 「in-core 仪器本身就是遮罩」那一类 —— 可以放心做对照。
+if(BATCHSMITH_ABORT_MSG_LOCAL)
+    target_compile_definitions(batchsmith_core PRIVATE BATCHSMITH_ABORT_MSG_LOCAL=1)
+endif()

@@ -577,14 +577,29 @@ void limit_hook(lua_State* state, lua_Debug* /*debug*/) {
     account.instructions += sandbox->limits().instruction_slice;
 
     if (account.instructions > sandbox->limits().max_instructions) {
+#ifdef BATCHSMITH_ABORT_MSG_LOCAL
+        // 诊断 A/B 的另一半（开了 BATCHSMITH_ABORT_MSG_LOCAL）：
+        // 把消息放进**具名局部**。它的寿命到块结束，而下面的 `luaL_error` 是 `longjmp`
+        // ⇒ 它**根本不会被析构**（少一次引用计数减），与下面那个"临时对象在完整表达式
+        // 结束时正常析构"的写法收支不同。两种写法的对照见 src/core/CMakeLists.txt 里那段说明。
+        const QString abort_message =
+                QStringLiteral("指令数超过上限（%1）").arg(sandbox->limits().max_instructions);
+        sandbox->raise(Violation::Instructions, abort_message);
+#else
         sandbox->raise(
                 Violation::Instructions,
                 QStringLiteral("指令数超过上限（%1）").arg(sandbox->limits().max_instructions));
-        // 诊断分界点：此刻 `raise()` 已经返回 ⇒ 上面那个 `.arg()` 临时对象**已经析构**
-        // （临时绑定到 `const QString&` 参数，生命周期到调用它的那条完整表达式结束），
-        // 而 Lua 的错误传播还没开始。所以这一行正好把两种可能切成两半：
-        //   * 到这里就「已保留」⇒ 释放发生在临时析构 ⇒ 赋值时引用计数少算了一次；
+#endif
+        // 诊断分界点：此刻 `raise()` 已经返回，而 Lua 的错误传播还没开始。
+        // 所以这一行正好把两种可能切成两半：
+        //   * 到这里就「已保留」⇒ 释放发生在"消息那一份引用被减掉"的时候；
         //   * 到这里还好、只有后面才坏 ⇒ 凶手在 Lua 错误传播那条路上。
+        // ⚠️ 两条分支下的消息**引用数收支不同**，读这份探针时要先确认构建开的是哪一半：
+        //   * 默认（内联临时）：临时绑定到 `const QString&` 参数，寿命到**整条完整表达式**
+        //     结束 ⇒ 走过这一行时它**已经析构**，块只剩 `m_violation_message` 一份引用；
+        //   * `BATCHSMITH_ABORT_MSG_LOCAL=1`（具名局部）：寿命到**块结束**，而本函数最后
+        //     一句是 `luaL_error`（`longjmp`）⇒ 它**永远不会析构**，块此时还剩两份引用。
+        //     所以那一半是"多欠了一次减"，不是等价替换 —— 对照结论必须连着这一点读。
         sandbox->trace_violation_message("limit_hook：raise 返回之后");
         // 诊断：挂写看门狗（见 sandbox.cpp 里那段说明）。**必须挂在这里、不能挂进 `raise()`**：
         // `raise(...)` 那条语句收尾时参数临时对象会析构，那也是一次合法的引用计数写，
